@@ -38,6 +38,41 @@
       </button>
     </div>
 
+    <!-- Filter Bar -->
+    <div class="mx-4 mt-2 flex items-center gap-3">
+      <select
+        v-model="filterStatus"
+        class="rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+      >
+        <option value="">全部状态</option>
+        <option value="PASS">通过</option>
+        <option value="FAIL">失败</option>
+        <option value="PENDING">待审核</option>
+        <option value="REJECTED">已拒绝</option>
+      </select>
+      <select
+        v-model="filterSentiment"
+        class="rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+      >
+        <option value="">全部情感</option>
+        <option value="POSITIVE">正面</option>
+        <option value="NEUTRAL">中性</option>
+        <option value="NEGATIVE">负面</option>
+      </select>
+      <input
+        v-model="filterKeyword"
+        type="text"
+        placeholder="搜索回复内容..."
+        class="rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+      />
+      <button
+        class="text-xs text-gray-500 hover:text-gray-700"
+        @click="resetFilters"
+      >
+        重置
+      </button>
+    </div>
+
     <div class="m-4">
       <VLoading v-if="loading" />
 
@@ -312,6 +347,11 @@ const totalPages = ref(0)
 const selectedNames = ref<Set<string>>(new Set())
 const selectAll = ref(false)
 
+// Filter state
+const filterStatus = ref("")
+const filterSentiment = ref("")
+const filterKeyword = ref("")
+
 const toggleSelect = (name: string) => {
   if (selectedNames.value.has(name)) {
     selectedNames.value.delete(name)
@@ -340,9 +380,13 @@ const conversationMessages = ref<ConversationMessage[]>([])
 const fetchReplies = async () => {
   loading.value = true
   try {
+    const params: Record<string, string | number> = { page: page.value, size: size.value }
+    if (filterStatus.value) params.status = filterStatus.value
+    if (filterSentiment.value) params.sentiment = filterSentiment.value
+    if (filterKeyword.value) params.keyword = filterKeyword.value
     const { data } = await axiosInstance.get(
       "/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies",
-      { params: { page: page.value, size: size.value } },
+      { params },
     )
     replies.value = data.items || []
     total.value = data.total || 0
@@ -560,6 +604,19 @@ const renderContent = (content: string) => {
     .replace(/<p[^>]*>/gi, "<p style='margin:0 0 0.5em 0'>")
     .replace(/<a /gi, "<a target='_blank' rel='noopener noreferrer' ")
 }
+
+const resetFilters = () => {
+  filterStatus.value = ""
+  filterSentiment.value = ""
+  filterKeyword.value = ""
+  page.value = 1
+  fetchReplies()
+}
+
+watch([filterStatus, filterSentiment, filterKeyword], () => {
+  page.value = 1
+  fetchReplies()
+})
 
 watch(page, () => {
   selectedNames.value.clear()

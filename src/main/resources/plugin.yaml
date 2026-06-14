@@ -24,4 +24,4 @@ spec:
   configMapName: "comment-ai-autopilot-configmap"
   version: "0.0.1-w5s2t7"
   pluginDependencies:
-    ai-foundation?: "*"
+    ai-foundation: "*"

@@ -1,14 +1,15 @@
 package top.nxxy335.commentaiautopilot.service;
 
-import lombok.RequiredArgsConstructor;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
+import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.Metadata;
 import run.halo.app.extension.ReactiveExtensionClient;
-import run.halo.app.plugin.ReactiveSettingFetcher;
 import top.nxxy335.commentaiautopilot.extension.AiCommentReply;
 
 import java.time.Duration;
@@ -17,8 +18,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 @Slf4j
-@RequiredArgsConstructor
 public class AiReplyOrchestrator {
+
+    private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
     private final ContextExtractor contextExtractor;
     private final PromptBuilder promptBuilder;
@@ -28,11 +30,30 @@ public class AiReplyOrchestrator {
     private final CommentReplyPublisher commentReplyPublisher;
     private final FilterService filterService;
     private final ReactiveExtensionClient client;
-    private final ReactiveSettingFetcher settingFetcher;
+    private final ObjectMapper objectMapper;
 
     // In-memory dedup: tracks which comment/reply is currently being processed
     // Prevents duplicate replies when Reconciler fires multiple times
     private final ConcurrentHashMap<String, Boolean> processingLocks = new ConcurrentHashMap<>();
+
+    public AiReplyOrchestrator(ContextExtractor contextExtractor,
+                               PromptBuilder promptBuilder,
+                               AiReplyService aiReplyService,
+                               SentimentService sentimentService,
+                               ReviewService reviewService,
+                               CommentReplyPublisher commentReplyPublisher,
+                               FilterService filterService,
+                               ReactiveExtensionClient client) {
+        this.contextExtractor = contextExtractor;
+        this.promptBuilder = promptBuilder;
+        this.aiReplyService = aiReplyService;
+        this.sentimentService = sentimentService;
+        this.reviewService = reviewService;
+        this.commentReplyPublisher = commentReplyPublisher;
+        this.filterService = filterService;
+        this.client = client;
+        this.objectMapper = new ObjectMapper();
+    }
 
     /**
      * Process a new comment or reply.
@@ -151,6 +172,7 @@ public class AiReplyOrchestrator {
 
     /**
      * Generate AI reply, optionally review it, then publish.
+     * Includes retry logic for empty AI replies and review failures.
      */
     private Mono<Void> generateAndPublish(String prompt, ContextExtractor.CommentContext context,
                                            AiCommentReply replyRecord, String modelName) {
@@ -159,7 +181,7 @@ public class AiReplyOrchestrator {
             .flatMap(aiReply -> {
                 if (aiReply.isBlank()) {
                     log.warn("[Orchestrator] AI generated empty reply for: {}", context.commentId());
-                    return updateRecord(replyRecord, "", 0, "FAIL", false).then();
+                    return retryOrFail(replyRecord, context, modelName, "AI generated empty reply");
                 }
 
                 log.info("[Orchestrator] AI generated reply for {}: {} chars",
@@ -172,7 +194,9 @@ public class AiReplyOrchestrator {
                         if ("FAIL".equals(reviewResult.status())) {
                             log.warn("[Orchestrator] Content safety review FAILED for: {}, not publishing",
                                 context.commentId());
-                            return updateRecord(replyRecord, aiReply, 0, "FAIL", false).then();
+                            // Save the failed reply content, then retry
+                            return updateRecord(replyRecord, aiReply, 0, "FAIL", false)
+                                .then(retryOrFail(replyRecord, context, modelName, "Content safety review failed"));
                         }
                         return publishReply(context, aiReply, replyRecord, reviewResult.score());
                     })
@@ -184,6 +208,73 @@ public class AiReplyOrchestrator {
                         return publishReply(context, aiReply, replyRecord, 100);
                     });
             });
+    }
+
+    /**
+     * Decide whether to retry or mark as final FAIL.
+     * If retryCount < maxRetryCount, increment retryCount, set status to PENDING,
+     * delay with exponential backoff, then re-execute the generate+review+publish flow.
+     * Otherwise, mark as final FAIL.
+     */
+    private Mono<Void> retryOrFail(AiCommentReply replyRecord,
+                                    ContextExtractor.CommentContext context,
+                                    String modelName,
+                                    String reason) {
+        return getMaxRetryCount().flatMap(maxRetry -> {
+            int currentRetryCount = replyRecord.getSpec().getRetryCount() != null
+                ? replyRecord.getSpec().getRetryCount() : 0;
+
+            if (currentRetryCount < maxRetry) {
+                int newRetryCount = currentRetryCount + 1;
+                long delaySeconds = 5L * (1L << currentRetryCount); // 5 * 2^retryCount
+                log.info("[Orchestrator] Retrying ({}/{}) for {} after {}s, reason: {}",
+                    newRetryCount, maxRetry, context.commentId(), delaySeconds, reason);
+
+                // Update retryCount and reset status to PENDING
+                return updateRecordForRetry(replyRecord, newRetryCount)
+                    .delayElement(Duration.ofSeconds(delaySeconds))
+                    .then(retryGenerate(context, replyRecord, modelName));
+            } else {
+                log.warn("[Orchestrator] Max retry count ({}) exceeded for: {}, marking as FAIL. Reason: {}",
+                    maxRetry, context.commentId(), reason);
+                return updateRecord(replyRecord, "", 0, "FAIL", false).then();
+            }
+        });
+    }
+
+    /**
+     * Re-execute the core generate+review+publish flow for a retry.
+     * Rebuilds the prompt from context and sentiment, then calls generateAndPublish again.
+     */
+    private Mono<Void> retryGenerate(ContextExtractor.CommentContext context,
+                                      AiCommentReply replyRecord,
+                                      String modelName) {
+        return sentimentService.analyzeSentiment(context.commentContent(), modelName)
+            .flatMap(sentimentResult -> promptBuilder.buildPrompt(context, sentimentResult.sentiment())
+                .flatMap(prompt -> generateAndPublish(prompt, context, replyRecord, modelName))
+            );
+    }
+
+    /**
+     * Update the record's retryCount and reset status to PENDING for a retry attempt.
+     */
+    private Mono<AiCommentReply> updateRecordForRetry(AiCommentReply record, int newRetryCount) {
+        return client.fetch(AiCommentReply.class, record.getMetadata().getName())
+            .flatMap(latest -> {
+                latest.getSpec().setRetryCount(newRetryCount);
+                latest.getSpec().setStatus("PENDING");
+                latest.getSpec().setReply("");
+                latest.getSpec().setScore(0);
+                latest.getSpec().setPublished(false);
+                return client.update(latest);
+            })
+            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                .filter(e -> e instanceof OptimisticLockingFailureException)
+                .doBeforeRetry(signal -> log.debug("[Orchestrator] Retrying retry-update for {} due to optimistic lock",
+                    record.getMetadata().getName()))
+            )
+            .doOnSuccess(updated -> log.debug("[Orchestrator] Record {} updated for retry: retryCount={}",
+                record.getMetadata().getName(), newRetryCount));
     }
 
     /**
@@ -205,39 +296,102 @@ public class AiReplyOrchestrator {
     }
 
     private Mono<String> getModelName() {
-        return settingFetcher.getSettingValue("model")
-            .map(node -> {
-                var nameNode = node.get("modelName");
-                if (nameNode != null && !nameNode.asText().isBlank()) {
-                    return nameNode.asText();
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String modelJson = data.get("model");
+                if (modelJson == null || modelJson.isBlank()) return null;
+                try {
+                    JsonNode node = objectMapper.readTree(modelJson);
+                    JsonNode nameNode = node.get("modelName");
+                    if (nameNode != null && !nameNode.asText().isBlank()) {
+                        return nameNode.asText();
+                    }
+                } catch (Exception e) {
+                    log.warn("[Orchestrator] Failed to parse modelName from ConfigMap: {}", e.getMessage());
                 }
-                return "";
+                return null;
             })
             .onErrorResume(e -> {
-                log.debug("[Orchestrator] Failed to fetch model setting: {}", e.getMessage());
-                return Mono.just("");
+                log.debug("[Orchestrator] Failed to fetch model setting from ConfigMap: {}", e.getMessage());
+                return Mono.empty();
             })
             .defaultIfEmpty("");
     }
 
     private Mono<Boolean> isAutoReplyEnabled() {
-        return settingFetcher.getSettingValue("basic")
-            .map(node -> !node.has("autoReply") || node.get("autoReply").asBoolean(true))
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String basicJson = data.get("basic");
+                if (basicJson == null || basicJson.isBlank()) return null;
+                try {
+                    JsonNode node = objectMapper.readTree(basicJson);
+                    if (!node.has("autoReply")) {
+                        return true;
+                    }
+                    return node.get("autoReply").asBoolean(true);
+                } catch (Exception e) {
+                    log.warn("[Orchestrator] Failed to parse autoReply from ConfigMap: {}", e.getMessage());
+                    return null;
+                }
+            })
             .onErrorResume(e -> {
-                log.debug("[Orchestrator] Failed to fetch autoReply setting: {}", e.getMessage());
-                return Mono.just(true);
+                log.debug("[Orchestrator] Failed to fetch autoReply setting from ConfigMap: {}", e.getMessage());
+                return Mono.empty();
             })
             .defaultIfEmpty(true);
     }
 
     private Mono<Boolean> isAutoPublishEnabled() {
-        return settingFetcher.getSettingValue("basic")
-            .map(node -> !node.has("autoPublish") || node.get("autoPublish").asBoolean(true))
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String basicJson = data.get("basic");
+                if (basicJson == null || basicJson.isBlank()) return null;
+                try {
+                    JsonNode node = objectMapper.readTree(basicJson);
+                    if (!node.has("autoPublish")) {
+                        return true;
+                    }
+                    return node.get("autoPublish").asBoolean(true);
+                } catch (Exception e) {
+                    log.warn("[Orchestrator] Failed to parse autoPublish from ConfigMap: {}", e.getMessage());
+                    return null;
+                }
+            })
             .onErrorResume(e -> {
-                log.debug("[Orchestrator] Failed to fetch autoPublish setting: {}", e.getMessage());
-                return Mono.just(true);
+                log.debug("[Orchestrator] Failed to fetch autoPublish setting from ConfigMap: {}", e.getMessage());
+                return Mono.empty();
             })
             .defaultIfEmpty(true);
+    }
+
+    private Mono<Integer> getMaxRetryCount() {
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String basicJson = data.get("basic");
+                if (basicJson == null || basicJson.isBlank()) return null;
+                try {
+                    JsonNode node = objectMapper.readTree(basicJson);
+                    if (node.has("maxRetryCount")) {
+                        return node.get("maxRetryCount").asInt(3);
+                    }
+                } catch (Exception e) {
+                    log.warn("[Orchestrator] Failed to parse maxRetryCount from ConfigMap: {}", e.getMessage());
+                }
+                return null;
+            })
+            .onErrorResume(e -> {
+                log.debug("[Orchestrator] Failed to fetch maxRetryCount setting from ConfigMap: {}", e.getMessage());
+                return Mono.empty();
+            })
+            .defaultIfEmpty(3);
     }
 
     private Mono<AiCommentReply> createAiCommentReply(ContextExtractor.CommentContext context, String sentiment) {

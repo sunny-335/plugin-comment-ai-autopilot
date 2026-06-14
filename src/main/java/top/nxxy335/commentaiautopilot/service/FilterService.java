@@ -70,8 +70,9 @@ public class FilterService {
                         ? node.get("blockedCommenters").asText("") : "";
                     List<String> blockedCommenters = parseList(blockedCommentersStr);
                     String commenterName = getCommenterDisplayName(comment);
-                    if (isInList(commenterName, blockedCommenters)) {
-                        log.info("[Filter] Commenter '{}' is in blocked list, skipping", commenterName);
+                    String commenterEmail = getCommenterEmail(comment);
+                    if (isInList(commenterName, blockedCommenters) || isInList(commenterEmail, blockedCommenters)) {
+                        log.info("[Filter] Commenter '{}' (email: '{}') is in blocked list, skipping", commenterName, commenterEmail);
                         return true;
                     }
                     return false;
@@ -128,6 +129,16 @@ public class FilterService {
         if (comment.getSpec() == null || comment.getSpec().getOwner() == null) return "";
         var displayName = comment.getSpec().getOwner().getDisplayName();
         return displayName != null ? displayName : "";
+    }
+
+    private String getCommenterEmail(Comment comment) {
+        if (comment.getSpec() == null || comment.getSpec().getOwner() == null) return "";
+        var owner = comment.getSpec().getOwner();
+        if ("EMAIL".equals(owner.getKind())) {
+            var name = owner.getName();
+            return name != null ? name : "";
+        }
+        return "";
     }
 
     private List<String> parseList(String str) {

@@ -1,17 +1,25 @@
 package top.nxxy335.commentaiautopilot.service;
 
-import lombok.RequiredArgsConstructor;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
-import run.halo.app.plugin.ReactiveSettingFetcher;
+import run.halo.app.extension.ConfigMap;
+import run.halo.app.extension.ReactiveExtensionClient;
 
 @Component
 @Slf4j
-@RequiredArgsConstructor
 public class PromptBuilder {
 
-    private final ReactiveSettingFetcher settingFetcher;
+    private final ReactiveExtensionClient client;
+    private final ObjectMapper objectMapper;
+    private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
+
+    public PromptBuilder(ReactiveExtensionClient client) {
+        this.client = client;
+        this.objectMapper = new ObjectMapper();
+    }
 
     private static final String SAFETY_PROMPT = """
             【安全规范】
@@ -76,13 +84,22 @@ public class PromptBuilder {
     }
 
     private Mono<String> getPromptTemplate() {
-        return settingFetcher.getSettingValue("prompt")
-            .map(node -> {
-                var templateNode = node.get("customPromptTemplate");
-                if (templateNode != null && !templateNode.asText().isBlank()) {
-                    return templateNode.asText();
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String promptJson = data.get("prompt");
+                if (promptJson == null || promptJson.isBlank()) return null;
+                try {
+                    JsonNode node = objectMapper.readTree(promptJson);
+                    JsonNode templateNode = node.get("customPromptTemplate");
+                    if (templateNode != null && !templateNode.asText().isBlank()) {
+                        return templateNode.asText();
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to parse customPromptTemplate from ConfigMap: {}", e.getMessage());
                 }
-                return DEFAULT_PROMPT_TEMPLATE;
+                return null;
             })
             .onErrorResume(e -> {
                 log.debug("Failed to fetch prompt template setting: {}", e.getMessage());
@@ -92,13 +109,22 @@ public class PromptBuilder {
     }
 
     private Mono<String> getPersonaPrompt() {
-        return settingFetcher.getSettingValue("persona")
-            .map(node -> {
-                var promptNode = node.get("personaPrompt");
-                if (promptNode != null && !promptNode.asText().isBlank()) {
-                    return promptNode.asText();
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String personaJson = data.get("persona");
+                if (personaJson == null || personaJson.isBlank()) return null;
+                try {
+                    JsonNode node = objectMapper.readTree(personaJson);
+                    JsonNode promptNode = node.get("personaPrompt");
+                    if (promptNode != null && !promptNode.asText().isBlank()) {
+                        return promptNode.asText();
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to parse personaPrompt from ConfigMap: {}", e.getMessage());
                 }
-                return DEFAULT_PERSONA_PROMPT;
+                return null;
             })
             .onErrorResume(e -> {
                 log.debug("Failed to fetch persona prompt setting: {}", e.getMessage());

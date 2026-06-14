@@ -24,7 +24,7 @@ spec:
         - $formkit: textarea
           name: blockedCommenters
           label: 评论者黑名单
-          help: 输入评论者显示名称，多个用逗号分隔。这些评论者的评论不会触发AI回复
+          help: 输入评论者显示名称或邮箱，多个用逗号分隔。这些评论者的评论不会触发AI回复
           value: ""
     - group: persona
       label: AI角色设置
@@ -57,4 +57,18 @@ spec:
           name: customPromptTemplate
           label: 自定义Prompt模板
           value: "{{persona_prompt}}\n\n{{safety_prompt}}\n\n【语言要求】请用评论所使用的语言回复。如果评论是英文，请用英文回复；如果是中文，请用中文回复；如果是日文，请用日文回复；以此类推。\n\n请回复以下评论。注意：\n- 回复长度应与评论长度匹配，简短问候简短回复\n- 不要复述或总结文章内容\n- 自然对话，不要写小作文\n- 只有评论涉及具体内容时才针对性回应\n\n文章（仅供理解上下文，不要复述）：\n{{article}}\n\n评论：\n{{comment}}"
+    - group: cleanup
+      label: 数据清理
+      formSchema:
+        - $formkit: switch
+          name: cleanupEnabled
+          label: 启用自动清理
+          value: true
+        - $formkit: number
+          name: retentionDays
+          label: 保留天数
+          help: 超过此天数的AI回复记录将被自动清理
+          value: 30
+          min: 1
+          max: 365
 

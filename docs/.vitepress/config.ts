@@ -25,6 +25,7 @@ export default defineConfig({
           { text: "情感分析", link: "/guide/sentiment" },
           { text: "过滤规则", link: "/guide/filter" },
           { text: "手动触发", link: "/guide/manual-trigger" },
+          { text: "数据清理", link: "/guide/cleanup" },
         ],
       },
       {

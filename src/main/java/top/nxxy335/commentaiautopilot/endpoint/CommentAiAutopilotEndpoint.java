@@ -16,6 +16,7 @@ import run.halo.app.extension.ListOptions;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.app.extension.PageRequestImpl;
 import top.nxxy335.commentaiautopilot.extension.AiCommentReply;
+import top.nxxy335.commentaiautopilot.service.AiReplyCleanupService;
 import top.nxxy335.commentaiautopilot.service.AiReplyOrchestrator;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -29,8 +30,10 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
@@ -40,13 +43,15 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
 
     private final ReactiveExtensionClient client;
     private final AiReplyOrchestrator orchestrator;
+    private final AiReplyCleanupService cleanupService;
     private final ObjectMapper objectMapper;
 
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator) {
+    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService) {
         this.client = client;
         this.orchestrator = orchestrator;
+        this.cleanupService = cleanupService;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -65,6 +70,8 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .POST("/replies/{name}/reject", this::rejectReply)
             .POST("/comments/{commentName}/trigger", this::triggerReply)
             .POST("/replies/{replyName}/trigger-conversation", this::triggerConversationReply)
+            .GET("/commenters", this::listCommenters)
+            .POST("/cleanup", this::triggerCleanup)
             .build();
     }
 
@@ -76,10 +83,53 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     private Mono<ServerResponse> listReplies(ServerRequest request) {
         var page = Integer.parseInt(request.queryParam("page").orElse("1"));
         var size = Integer.parseInt(request.queryParam("size").orElse("20"));
-        var sort = Sort.by(Sort.Order.desc("metadata.creationTimestamp"));
-        var pageable = PageRequestImpl.of(page, size, sort);
+        var statusFilter = request.queryParam("status").orElse("");
+        var sentimentFilter = request.queryParam("sentiment").orElse("");
+        var keywordFilter = request.queryParam("keyword").orElse("");
 
-        return client.listBy(AiCommentReply.class, ListOptions.builder().build(), pageable)
+        return client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
+            .collectList()
+            .map(replies -> {
+                var filtered = replies.stream()
+                    .filter(r -> {
+                        if (!statusFilter.isBlank()
+                            && !statusFilter.equals(r.getSpec().getStatus())) {
+                            return false;
+                        }
+                        if (!sentimentFilter.isBlank()
+                            && !sentimentFilter.equals(r.getSpec().getSentiment())) {
+                            return false;
+                        }
+                        if (!keywordFilter.isBlank()) {
+                            String reply = r.getSpec().getReply();
+                            if (reply == null || !reply.contains(keywordFilter)) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    })
+                    .sorted(Comparator.comparing(
+                        (AiCommentReply r) -> r.getMetadata().getCreationTimestamp(),
+                        Comparator.nullsLast(Comparator.reverseOrder())
+                    ))
+                    .toList();
+
+                int total = filtered.size();
+                int fromIndex = (page - 1) * size;
+                int toIndex = Math.min(fromIndex + size, total);
+                List<AiCommentReply> pageContent = fromIndex < total
+                    ? filtered.subList(fromIndex, toIndex) : List.of();
+
+                Map<String, Object> result = new HashMap<>();
+                result.put("items", pageContent);
+                result.put("total", total);
+                result.put("page", page);
+                result.put("size", size);
+                result.put("totalPages", (int) Math.ceil((double) total / size));
+                result.put("first", page == 1);
+                result.put("last", toIndex >= total);
+                return result;
+            })
             .flatMap(result -> ServerResponse.ok().bodyValue(result));
     }
 
@@ -495,4 +545,45 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         String time,
         boolean isAi
     ) {}
+
+    public record CommenterInfo(
+        String displayName,
+        String email
+    ) {}
+
+    private Mono<ServerResponse> listCommenters(ServerRequest request) {
+        return client.listAll(Comment.class, ListOptions.builder().build(), Sort.unsorted())
+            .collectList()
+            .map(comments -> {
+                Set<String> seen = new HashSet<>();
+                List<CommenterInfo> result = new ArrayList<>();
+                for (var comment : comments) {
+                    var owner = comment.getSpec() != null ? comment.getSpec().getOwner() : null;
+                    if (owner == null) continue;
+                    String displayName = owner.getDisplayName() != null ? owner.getDisplayName() : "";
+                    String email = "EMAIL".equals(owner.getKind()) && owner.getName() != null
+                        ? owner.getName() : "";
+                    String key = displayName.toLowerCase() + "|" + email.toLowerCase();
+                    if (seen.add(key)) {
+                        result.add(new CommenterInfo(displayName, email));
+                    }
+                }
+                return result;
+            })
+            .flatMap(commenters -> ServerResponse.ok().bodyValue(commenters));
+    }
+
+    private Mono<ServerResponse> triggerCleanup(ServerRequest request) {
+        return Mono.fromCallable(() -> {
+                int retentionDays = cleanupService.getRetentionDays();
+                long deleted = cleanupService.executeCleanup(retentionDays);
+                return Map.of("deletedCount", deleted, "retentionDays", retentionDays);
+            })
+            .flatMap(result -> ServerResponse.ok().bodyValue(result))
+            .onErrorResume(e -> {
+                log.warn("Failed to trigger cleanup: {}", e.getMessage());
+                return ServerResponse.status(org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR)
+                    .bodyValue(Map.of("message", "清理失败: " + e.getMessage()));
+            });
+    }
 }
