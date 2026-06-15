@@ -56,5 +56,8 @@ public class AiCommentReply extends AbstractExtension {
 
         @Schema(description = "评论情感倾向: POSITIVE/NEUTRAL/NEGATIVE")
         private String sentiment;
+
+        @Schema(description = "使用的AI角色名称")
+        private String personaName;
     }
 }

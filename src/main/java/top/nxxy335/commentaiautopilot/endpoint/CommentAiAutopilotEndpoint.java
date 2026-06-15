@@ -1,6 +1,7 @@
 package top.nxxy335.commentaiautopilot.endpoint;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
@@ -8,6 +9,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import run.halo.app.core.extension.content.Comment;
+import run.halo.app.core.extension.content.Post;
 import run.halo.app.core.extension.content.Reply;
 import run.halo.app.core.extension.endpoint.CustomEndpoint;
 import run.halo.app.extension.ConfigMap;
@@ -16,6 +18,8 @@ import run.halo.app.extension.ListOptions;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.app.extension.PageRequestImpl;
 import top.nxxy335.commentaiautopilot.extension.AiCommentReply;
+import top.nxxy335.commentaiautopilot.extension.AiPersona;
+import top.nxxy335.commentaiautopilot.service.AiFoundationClient;
 import top.nxxy335.commentaiautopilot.service.AiReplyCleanupService;
 import top.nxxy335.commentaiautopilot.service.AiReplyOrchestrator;
 
@@ -44,14 +48,16 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     private final ReactiveExtensionClient client;
     private final AiReplyOrchestrator orchestrator;
     private final AiReplyCleanupService cleanupService;
+    private final ObjectProvider<AiFoundationClient> aiFoundationClientProvider;
     private final ObjectMapper objectMapper;
 
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService) {
+    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, ObjectProvider<AiFoundationClient> aiFoundationClientProvider) {
         this.client = client;
         this.orchestrator = orchestrator;
         this.cleanupService = cleanupService;
+        this.aiFoundationClientProvider = aiFoundationClientProvider;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -72,6 +78,12 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .POST("/replies/{replyName}/trigger-conversation", this::triggerConversationReply)
             .GET("/commenters", this::listCommenters)
             .POST("/cleanup", this::triggerCleanup)
+            .GET("/health", this::health)
+            .GET("/personas", this::listPersonas)
+            .GET("/personas/{name}", this::getPersonaByName)
+            .POST("/personas", this::createPersona)
+            .PUT("/personas/{name}", this::updatePersona)
+            .DELETE("/personas/{name}", this::deletePersona)
             .build();
     }
 
@@ -142,9 +154,39 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     }
 
     private Mono<ServerResponse> getStats(ServerRequest request) {
+        String range = request.queryParam("range").orElse("7");
+
         return client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
             .collectList()
-            .map(replies -> {
+            .map(allReplies -> {
+                // 根据 range 计算截止时间
+                ZoneId zoneId = ZoneId.systemDefault();
+                LocalDate today = LocalDate.now(zoneId);
+                Instant cutoffInstant;
+                int trendDays;
+
+                if ("all".equals(range)) {
+                    cutoffInstant = null; // 不做时间过滤
+                    trendDays = 30; // "all" 时趋势也展示最近30天
+                } else {
+                    int days = Integer.parseInt(range);
+                    cutoffInstant = today.minusDays(days).atStartOfDay(zoneId).toInstant();
+                    trendDays = days;
+                }
+
+                // 根据 range 过滤记录
+                List<AiCommentReply> replies;
+                if (cutoffInstant != null) {
+                    replies = allReplies.stream()
+                        .filter(r -> {
+                            Instant ts = r.getMetadata().getCreationTimestamp();
+                            return ts != null && !ts.isBefore(cutoffInstant);
+                        })
+                        .toList();
+                } else {
+                    replies = allReplies;
+                }
+
                 long total = replies.size();
                 long passCount = replies.stream()
                     .filter(r -> "PASS".equals(r.getSpec().getStatus())).count();
@@ -174,11 +216,10 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     }
                 }
 
-                ZoneId zoneId = ZoneId.systemDefault();
+                // 计算 dailyTrend
                 DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-                LocalDate today = LocalDate.now(zoneId);
                 Map<LocalDate, Long> dailyMap = new HashMap<>();
-                for (int i = 0; i < 7; i++) {
+                for (int i = 0; i < trendDays; i++) {
                     dailyMap.put(today.minusDays(i), 0L);
                 }
                 for (var r : replies) {
@@ -194,7 +235,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     }
                 }
                 List<DailyCount> dailyTrend = new ArrayList<>();
-                for (int i = 0; i < 7; i++) {
+                for (int i = 0; i < trendDays; i++) {
                     LocalDate date = today.minusDays(i);
                     dailyTrend.add(new DailyCount(date.format(formatter), dailyMap.get(date)));
                 }
@@ -212,29 +253,35 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     }
 
     private Mono<ServerResponse> getPersona(ServerRequest request) {
-        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
-            .mapNotNull(cm -> {
-                var data = cm.getData();
-                if (data == null) return new PersonaResponse("小回", "", "");
-                String personaJson = data.get("persona");
-                if (personaJson == null || personaJson.isBlank()) return new PersonaResponse("小回", "", "");
-                try {
-                    JsonNode node = objectMapper.readTree(personaJson);
-                    String name = node.has("personaName") ? node.get("personaName").asText("小回") : "小回";
-                    String prompt = node.has("personaPrompt") ? node.get("personaPrompt").asText("") : "";
-                    String email = node.has("personaEmail") ? node.get("personaEmail").asText("") : "";
-                    return new PersonaResponse(name, prompt, email);
-                } catch (Exception e) {
-                    log.warn("Failed to parse persona config: {}", e.getMessage());
-                    return new PersonaResponse("小回", "", "");
+        return client.list(AiPersona.class,
+                persona -> persona.getSpec() != null && Boolean.TRUE.equals(persona.getSpec().getIsDefault()),
+                null)
+            .next()
+            .flatMap(persona -> {
+                String email = persona.getSpec().getEmail();
+                String avatarUrl = "";
+                if (email != null && !email.isBlank()) {
+                    try {
+                        var digest = java.security.MessageDigest.getInstance("SHA-256");
+                        var hashBytes = digest.digest(email.trim().toLowerCase().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        var hexString = new StringBuilder();
+                        for (byte b : hashBytes) {
+                            hexString.append(String.format("%02x", b));
+                        }
+                        avatarUrl = "https://cn.cravatar.com/avatar/" + hexString;
+                    } catch (Exception ignored) {}
                 }
+                return ServerResponse.ok().bodyValue(Map.of(
+                    "name", persona.getSpec().getDisplayName(),
+                    "prompt", persona.getSpec().getPrompt() != null ? persona.getSpec().getPrompt() : "",
+                    "avatar", avatarUrl
+                ));
             })
-            .defaultIfEmpty(new PersonaResponse("小回", "", ""))
-            .onErrorResume(e -> {
-                log.warn("Failed to fetch persona settings: {}", e.getMessage());
-                return Mono.just(new PersonaResponse("小回", "", ""));
-            })
-            .flatMap(persona -> ServerResponse.ok().bodyValue(persona));
+            .switchIfEmpty(ServerResponse.ok().bodyValue(Map.of(
+                "name", "小回",
+                "prompt", "",
+                "avatar", ""
+            )));
     }
 
     public record DailyCount(String date, long count) {}
@@ -489,9 +536,12 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     return ServerResponse.badRequest()
                         .bodyValue(Map.of("message", "该评论已有AI回复记录"));
                 }
-                // Trigger the orchestrator
-                return orchestrator.processComment(commentName, null, false)
-                    .then(ServerResponse.ok().bodyValue(Map.of("message", "已触发AI回复")));
+                // Read persona name from post annotations
+                return getPersonaNameFromComment(commentName)
+                    .flatMap(personaName ->
+                        orchestrator.processComment(commentName, null, false, personaName)
+                            .then(ServerResponse.ok().bodyValue(Map.of("message", "已触发AI回复")))
+                    );
             });
     }
 
@@ -514,15 +564,44 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                             return ServerResponse.badRequest()
                                 .bodyValue(Map.of("message", "该回复已有AI对话记录"));
                         }
-                        return orchestrator.processComment(commentName, replyName, true)
-                            .then(ServerResponse.ok().bodyValue(Map.of("message", "已触发AI对话回复")));
+                        return getPersonaNameFromComment(commentName)
+                            .flatMap(personaName ->
+                                orchestrator.processComment(commentName, replyName, true, personaName)
+                                    .then(ServerResponse.ok().bodyValue(Map.of("message", "已触发AI对话回复")))
+                            );
                     });
             })
             .switchIfEmpty(ServerResponse.notFound().build());
     }
 
+    private static final String AI_PERSONA_ANNOTATION = "comment-ai-autopilot.nxxy335.top/ai-persona";
+
+    private Mono<String> getPersonaNameFromComment(String commentName) {
+        return client.fetch(Comment.class, commentName)
+            .flatMap(comment -> {
+                var subjectRef = comment.getSpec().getSubjectRef();
+                if (subjectRef == null || !"Post".equals(subjectRef.getKind())) {
+                    return Mono.justOrEmpty(null);
+                }
+                String postName = subjectRef.getName();
+                return client.fetch(Post.class, postName)
+                    .mapNotNull(post -> {
+                        var annotations = post.getMetadata().getAnnotations();
+                        if (annotations != null) {
+                            String persona = annotations.get(AI_PERSONA_ANNOTATION);
+                            if (persona != null && !persona.isBlank()) {
+                                return persona;
+                            }
+                        }
+                        return null;
+                    });
+            })
+            .defaultIfEmpty("");
+    }
+
     private Mono<Reply> findReplyForRecord(AiCommentReply record) {
         // Find the Reply that belongs to the same comment and was created by AI
+        // If the record has a quoteReply, match by that too for precision
         return client.list(Reply.class,
                 reply -> {
                     if (!record.getSpec().getCommentId().equals(reply.getSpec().getCommentName())) {
@@ -531,7 +610,14 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     var owner = reply.getSpec().getOwner();
                     if (owner == null) return false;
                     var annotations = owner.getAnnotations();
-                    return annotations != null && "true".equals(annotations.get("comment-ai-autopilot.nxxy335.top/is-ai"));
+                    if (annotations == null || !"true".equals(annotations.get("comment-ai-autopilot.nxxy335.top/is-ai"))) {
+                        return false;
+                    }
+                    // If record has a quoteReply, also match by quoteReply for precision
+                    if (record.getSpec().getReplyTo() != null && !record.getSpec().getReplyTo().isBlank()) {
+                        return record.getSpec().getReplyTo().equals(reply.getSpec().getQuoteReply());
+                    }
+                    return true;
                 },
                 null)
             .next()
@@ -585,5 +671,98 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                 return ServerResponse.status(org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR)
                     .bodyValue(Map.of("message", "清理失败: " + e.getMessage()));
             });
+    }
+
+    private Mono<ServerResponse> health(ServerRequest request) {
+        AiFoundationClient aiClient = aiFoundationClientProvider.getIfAvailable();
+        boolean aiFoundationInstalled = aiClient != null;
+
+        if (!aiFoundationInstalled) {
+            return ServerResponse.ok().bodyValue(
+                new HealthResponse(false, false, false, "", "unhealthy"));
+        }
+
+        // AI Foundation is installed, check if it's enabled and model is available
+        return aiClient.chat("ping", null)
+            .map(response -> (HealthResponse) new HealthResponse(true, true, true, "default", "healthy"))
+            .onErrorResume(e -> {
+                log.debug("Health check: AI Foundation call failed: {}", e.getMessage());
+                return Mono.just(new HealthResponse(true, true, false, "", "degraded"));
+            })
+            .flatMap(health -> ServerResponse.ok().bodyValue(health));
+    }
+
+    public record HealthResponse(
+        boolean aiFoundationInstalled,
+        boolean aiFoundationEnabled,
+        boolean modelAvailable,
+        String modelName,
+        String status
+    ) {}
+
+    private Mono<ServerResponse> listPersonas(ServerRequest request) {
+        return client.listAll(AiPersona.class, ListOptions.builder().build(), Sort.unsorted())
+            .collectList()
+            .flatMap(personas -> ServerResponse.ok().bodyValue(personas));
+    }
+
+    private Mono<ServerResponse> getPersonaByName(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return client.fetch(AiPersona.class, name)
+            .flatMap(persona -> ServerResponse.ok().bodyValue(persona))
+            .switchIfEmpty(ServerResponse.notFound().build());
+    }
+
+    private Mono<ServerResponse> createPersona(ServerRequest request) {
+        return request.bodyToMono(AiPersona.class)
+            .flatMap(persona -> {
+                if (persona.getMetadata() == null) {
+                    persona.setMetadata(new run.halo.app.extension.Metadata());
+                }
+                if (persona.getMetadata().getName() == null || persona.getMetadata().getName().isBlank()) {
+                    persona.getMetadata().setName("ai-persona-" + java.util.UUID.randomUUID().toString().substring(0, 8));
+                }
+                return client.create(persona)
+                    .flatMap(created -> ServerResponse.ok().bodyValue(created))
+                    .onErrorResume(e -> {
+                        log.warn("Failed to create persona: {}", e.getMessage());
+                        return ServerResponse.badRequest()
+                            .bodyValue(Map.of("message", "创建角色失败: " + e.getMessage()));
+                    });
+            })
+            .switchIfEmpty(ServerResponse.badRequest()
+                .bodyValue(Map.of("message", "请求体不能为空")));
+    }
+
+    private Mono<ServerResponse> updatePersona(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return request.bodyToMono(AiPersona.class)
+            .flatMap(updatedPersona -> client.fetch(AiPersona.class, name)
+                .flatMap(existing -> {
+                    existing.setSpec(updatedPersona.getSpec());
+                    return client.update(existing);
+                })
+                .flatMap(saved -> ServerResponse.ok().bodyValue(saved))
+                .onErrorResume(e -> {
+                    log.warn("Failed to update persona {}: {}", name, e.getMessage());
+                    return ServerResponse.badRequest()
+                        .bodyValue(Map.of("message", "更新角色失败: " + e.getMessage()));
+                })
+            )
+            .switchIfEmpty(ServerResponse.notFound().build());
+    }
+
+    private Mono<ServerResponse> deletePersona(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return client.fetch(AiPersona.class, name)
+            .flatMap(persona -> {
+                if (persona.getSpec() != null && Boolean.TRUE.equals(persona.getSpec().getIsDefault())) {
+                    return ServerResponse.badRequest()
+                        .bodyValue(Map.of("message", "默认角色不可删除，请先将其他角色设为默认"));
+                }
+                return client.delete(persona)
+                    .then(ServerResponse.ok().bodyValue(Map.of("message", "deleted")));
+            })
+            .switchIfEmpty(ServerResponse.notFound().build());
     }
 }

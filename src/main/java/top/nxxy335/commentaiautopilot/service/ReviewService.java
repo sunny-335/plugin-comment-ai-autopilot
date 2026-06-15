@@ -4,19 +4,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
-import run.halo.app.plugin.ReactiveSettingFetcher;
 
 @Component
 @Slf4j
 public class ReviewService {
 
     private final ObjectProvider<AiFoundationClient> aiFoundationClientProvider;
-    private final ReactiveSettingFetcher settingFetcher;
 
-    public ReviewService(ObjectProvider<AiFoundationClient> aiFoundationClientProvider,
-                         ReactiveSettingFetcher settingFetcher) {
+    public ReviewService(ObjectProvider<AiFoundationClient> aiFoundationClientProvider) {
         this.aiFoundationClientProvider = aiFoundationClientProvider;
-        this.settingFetcher = settingFetcher;
     }
 
     private static final String REVIEW_PROMPT_TEMPLATE = """

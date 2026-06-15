@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.scheduler.Schedulers;
 import run.halo.app.core.extension.content.Comment;
+import run.halo.app.core.extension.content.Post;
 import run.halo.app.extension.ExtensionClient;
 import run.halo.app.extension.controller.Controller;
 import run.halo.app.extension.controller.ControllerBuilder;
@@ -29,6 +30,7 @@ public class CommentReconciler implements Reconciler<Reconciler.Request> {
     private static final String PROCESSED_ANNOTATION = "comment-ai-autopilot.nxxy335.top/processed";
     private static final String AI_MARKER_ANNOTATION = "comment-ai-autopilot.nxxy335.top/is-ai";
     private static final String AI_PERSONA_OWNER_PREFIX = "ai-persona-";
+    private static final String AI_PERSONA_ANNOTATION = "comment-ai-autopilot.nxxy335.top/ai-persona";
 
     // Record the time when this bean was created (plugin startup time)
     private final Instant pluginStartTime = Instant.now();
@@ -88,10 +90,13 @@ public class CommentReconciler implements Reconciler<Reconciler.Request> {
                 markProcessed(comment);
                 client.update(comment);
 
+                // Read persona name from the post's annotations
+                String personaName = getPersonaNameFromComment(comment);
+
                 // Top-level comment → always trigger AI reply
-                log.info("[CommentReconciler] New top-level comment detected: {}", name);
+                log.info("[CommentReconciler] New top-level comment detected: {}, personaName: {}", name, personaName);
                 asyncStarted.set(true);
-                orchestrator.processComment(name, null, false)
+                orchestrator.processComment(name, null, false, personaName)
                     .subscribeOn(Schedulers.boundedElastic())
                     .doFinally(signal -> {
                         processingLocks.remove(name);
@@ -130,6 +135,29 @@ public class CommentReconciler implements Reconciler<Reconciler.Request> {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Read persona name from the post's annotations associated with this comment.
+     */
+    private String getPersonaNameFromComment(Comment comment) {
+        var subjectRef = comment.getSpec().getSubjectRef();
+        if (subjectRef == null || !"Post".equals(subjectRef.getKind())) {
+            return null;
+        }
+        String postName = subjectRef.getName();
+        return client.fetch(Post.class, postName)
+            .map(post -> {
+                var annotations = post.getMetadata().getAnnotations();
+                if (annotations != null) {
+                    String persona = annotations.get(AI_PERSONA_ANNOTATION);
+                    if (persona != null && !persona.isBlank()) {
+                        return persona;
+                    }
+                }
+                return null;
+            })
+            .orElse(null);
     }
 
     private boolean isProcessed(Map<String, String> annotations) {

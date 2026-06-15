@@ -141,7 +141,7 @@
                 </div>
 
                 <!-- Row 2: AI reply content (truncated) -->
-                <div class="text-sm text-gray-800 leading-relaxed break-words line-clamp-3">
+                <div class="text-sm text-gray-800 leading-relaxed break-words line-clamp-3 mt-2">
                   {{ stripHtml(reply.spec.reply) || '(空)' }}
                 </div>
               </div>
@@ -628,6 +628,12 @@ onMounted(fetchReplies)
 </script>
 
 <style scoped>
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .line-clamp-3 {
   display: -webkit-box;
   -webkit-line-clamp: 3;

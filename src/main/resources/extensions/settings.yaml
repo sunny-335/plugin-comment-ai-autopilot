@@ -21,26 +21,24 @@ spec:
           value: 3
           min: 1
           max: 10
+        - $formkit: number
+          name: maxConversationRounds
+          label: 最大对话轮次
+          help: 同一评论线程中AI最多自动回复的轮次，超过后不再回复
+          value: 8
+          min: 1
+          max: 100
+        - $formkit: number
+          name: rateLimitPerMinute
+          label: 速率限制
+          help: 每分钟最大AI回复数量，防止批量评论消耗过多额度
+          value: 10
+          min: 1
+          max: 100
         - $formkit: textarea
           name: blockedCommenters
           label: 评论者黑名单
-          help: 输入评论者显示名称或邮箱，多个用逗号分隔。这些评论者的评论不会触发AI回复
-          value: ""
-    - group: persona
-      label: AI角色设置
-      formSchema:
-        - $formkit: text
-          name: personaName
-          label: AI角色昵称
-          value: "小回"
-        - $formkit: textarea
-          name: personaPrompt
-          label: AI角色人格提示词
-          value: "你是「小回」，一个友善的评论者。你的回复简洁自然，像朋友聊天一样。简短的评论就简短回复，有深度的讨论才展开回应。不要长篇大论，不要复述文章内容。"
-        - $formkit: email
-          name: personaEmail
-          label: AI角色邮箱
-          help: 用于Gravatar头像服务展示头像
+          help: "输入评论者显示名称或邮箱，多个用逗号分隔。支持正则表达式，以 regex: 开头，如 regex:^spam.*"
           value: ""
     - group: model
       label: 模型设置
@@ -57,6 +55,21 @@ spec:
           name: customPromptTemplate
           label: 自定义Prompt模板
           value: "{{persona_prompt}}\n\n{{safety_prompt}}\n\n【语言要求】请用评论所使用的语言回复。如果评论是英文，请用英文回复；如果是中文，请用中文回复；如果是日文，请用日文回复；以此类推。\n\n请回复以下评论。注意：\n- 回复长度应与评论长度匹配，简短问候简短回复\n- 不要复述或总结文章内容\n- 自然对话，不要写小作文\n- 只有评论涉及具体内容时才针对性回应\n\n文章（仅供理解上下文，不要复述）：\n{{article}}\n\n评论：\n{{comment}}"
+        - $formkit: select
+          name: enabledPresets
+          label: 启用预设
+          help: 选择要启用的Prompt预设风格
+          value: []
+          multiple: true
+          options:
+            - label: 友好型
+              value: friendly
+            - label: 专业型
+              value: professional
+            - label: 幽默型
+              value: humorous
+            - label: 简洁型
+              value: concise
     - group: cleanup
       label: 数据清理
       formSchema:

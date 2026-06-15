@@ -7,6 +7,7 @@ import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
+import run.halo.app.core.extension.content.Reply;
 import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.Metadata;
 import run.halo.app.extension.ReactiveExtensionClient;
@@ -29,6 +30,7 @@ public class AiReplyOrchestrator {
     private final ReviewService reviewService;
     private final CommentReplyPublisher commentReplyPublisher;
     private final FilterService filterService;
+    private final RateLimitService rateLimitService;
     private final ReactiveExtensionClient client;
     private final ObjectMapper objectMapper;
 
@@ -43,6 +45,7 @@ public class AiReplyOrchestrator {
                                ReviewService reviewService,
                                CommentReplyPublisher commentReplyPublisher,
                                FilterService filterService,
+                               RateLimitService rateLimitService,
                                ReactiveExtensionClient client) {
         this.contextExtractor = contextExtractor;
         this.promptBuilder = promptBuilder;
@@ -51,6 +54,7 @@ public class AiReplyOrchestrator {
         this.reviewService = reviewService;
         this.commentReplyPublisher = commentReplyPublisher;
         this.filterService = filterService;
+        this.rateLimitService = rateLimitService;
         this.client = client;
         this.objectMapper = new ObjectMapper();
     }
@@ -61,8 +65,10 @@ public class AiReplyOrchestrator {
      * @param commentName     the parent Comment name
      * @param replyName       the Reply name that triggered this (null for top-level comments)
      * @param isAiConversation true when someone replied to AI's reply (conversation continuation)
+     * @param personaName     the persona name to use (null for default persona)
      */
-    public Mono<Void> processComment(String commentName, String replyName, boolean isAiConversation) {
+    public Mono<Void> processComment(String commentName, String replyName, boolean isAiConversation,
+                                      String personaName) {
         String lockKey = isAiConversation ? commentName + ":conv:" + replyName : commentName + ":top";
 
         // In-memory dedup: if already processing, skip immediately
@@ -71,8 +77,8 @@ public class AiReplyOrchestrator {
             return Mono.empty();
         }
 
-        log.info("[Orchestrator] Start processing: comment={}, replyName={}, isAiConversation={}",
-            commentName, replyName, isAiConversation);
+        log.info("[Orchestrator] Start processing: comment={}, replyName={}, isAiConversation={}, personaName={}",
+            commentName, replyName, isAiConversation, personaName);
 
         return isAutoReplyEnabled()
             .flatMap(enabled -> {
@@ -80,12 +86,18 @@ public class AiReplyOrchestrator {
                     log.info("[Orchestrator] Auto reply disabled, skipping: {}", commentName);
                     return Mono.empty();
                 }
-                return filterService.shouldProcess(commentName)
-                    .flatMap(shouldProcess -> {
-                        if (!shouldProcess) {
-                            log.info("[Orchestrator] Filtered out by rules: {}", commentName);
+                return getRateLimit()
+                    .flatMap(rateLimit -> {
+                        if (!rateLimitService.tryAcquire(rateLimit)) {
+                            log.info("[Orchestrator] 速率限制，跳过: {}", commentName);
                             return Mono.empty();
                         }
+                        return filterService.shouldProcess(commentName)
+                            .flatMap(shouldProcess -> {
+                                if (!shouldProcess) {
+                                    log.info("[Orchestrator] Filtered out by rules: {}", commentName);
+                                    return Mono.empty();
+                                }
                         // For top-level comments: skip if we already have ANY reply record
                         // For AI conversation: skip if we already replied to THIS specific reply
                         if (!isAiConversation) {
@@ -95,16 +107,27 @@ public class AiReplyOrchestrator {
                                         log.info("[Orchestrator] Already have reply record for: {}, skipping", commentName);
                                         return Mono.empty();
                                     }
-                                    return doProcess(commentName, replyName, isAiConversation);
+                                    return doProcess(commentName, replyName, isAiConversation, personaName);
                                 });
                         }
-                        return hasExistingConversationReply(replyName)
-                            .flatMap(hasReply -> {
-                                if (hasReply) {
-                                    log.info("[Orchestrator] Already replied to reply: {}, skipping", replyName);
-                                    return Mono.empty();
-                                }
-                                return doProcess(commentName, replyName, isAiConversation);
+                        // Check conversation rounds limit
+                        return getMaxConversationRounds()
+                            .flatMap(maxRounds -> getConversationRounds(commentName)
+                                .flatMap(rounds -> {
+                                    if (rounds >= maxRounds) {
+                                        log.info("[Orchestrator] 对话轮次已达上限({}/{}), 跳过: {}", rounds, maxRounds, commentName);
+                                        return Mono.empty();
+                                    }
+                                    return hasExistingConversationReply(replyName)
+                                        .flatMap(hasReply -> {
+                                            if (hasReply) {
+                                                log.info("[Orchestrator] Already replied to reply: {}, skipping", replyName);
+                                                return Mono.empty();
+                                            }
+                                            return doProcess(commentName, replyName, isAiConversation, personaName);
+                                        });
+                                })
+                            );
                             });
                     });
             })
@@ -117,16 +140,17 @@ public class AiReplyOrchestrator {
             .then();
     }
 
-    private Mono<Void> doProcess(String commentName, String replyName, boolean isAiConversation) {
+    private Mono<Void> doProcess(String commentName, String replyName, boolean isAiConversation,
+                                  String personaName) {
         return getModelName().flatMap(modelName ->
             contextExtractor.extract(commentName, replyName, isAiConversation)
                 .flatMap(context -> sentimentService.analyzeSentiment(context.commentContent(), modelName)
                     .flatMap(sentimentResult -> {
                         log.info("[Orchestrator] Sentiment for {}: {} (confidence: {})",
                             commentName, sentimentResult.sentiment(), sentimentResult.confidence());
-                        return promptBuilder.buildPrompt(context, sentimentResult.sentiment())
-                            .flatMap(prompt -> createAiCommentReply(context, sentimentResult.sentiment())
-                                .flatMap(replyRecord -> generateAndPublish(prompt, context, replyRecord, modelName))
+                        return promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
+                            .flatMap(prompt -> createAiCommentReply(context, sentimentResult.sentiment(), personaName)
+                                .flatMap(replyRecord -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
                             );
                     })
                 )
@@ -175,13 +199,14 @@ public class AiReplyOrchestrator {
      * Includes retry logic for empty AI replies and review failures.
      */
     private Mono<Void> generateAndPublish(String prompt, ContextExtractor.CommentContext context,
-                                           AiCommentReply replyRecord, String modelName) {
+                                           AiCommentReply replyRecord, String modelName,
+                                           String personaName) {
         return aiReplyService.generateReply(prompt, modelName)
             .defaultIfEmpty("")
             .flatMap(aiReply -> {
                 if (aiReply.isBlank()) {
                     log.warn("[Orchestrator] AI generated empty reply for: {}", context.commentId());
-                    return retryOrFail(replyRecord, context, modelName, "AI generated empty reply");
+                    return retryOrFail(replyRecord, context, modelName, personaName, "AI generated empty reply");
                 }
 
                 log.info("[Orchestrator] AI generated reply for {}: {} chars",
@@ -196,16 +221,16 @@ public class AiReplyOrchestrator {
                                 context.commentId());
                             // Save the failed reply content, then retry
                             return updateRecord(replyRecord, aiReply, 0, "FAIL", false)
-                                .then(retryOrFail(replyRecord, context, modelName, "Content safety review failed"));
+                                .then(retryOrFail(replyRecord, context, modelName, personaName, "Content safety review failed"));
                         }
-                        return publishReply(context, aiReply, replyRecord, reviewResult.score());
+                        return publishReply(context, aiReply, replyRecord, reviewResult.score(), personaName);
                     })
                     .switchIfEmpty(
-                        publishReply(context, aiReply, replyRecord, 100)
+                        publishReply(context, aiReply, replyRecord, 100, personaName)
                     )
                     .onErrorResume(e -> {
                         log.warn("[Orchestrator] Review error, auto-passing: {}", e.getMessage());
-                        return publishReply(context, aiReply, replyRecord, 100);
+                        return publishReply(context, aiReply, replyRecord, 100, personaName);
                     });
             });
     }
@@ -219,6 +244,7 @@ public class AiReplyOrchestrator {
     private Mono<Void> retryOrFail(AiCommentReply replyRecord,
                                     ContextExtractor.CommentContext context,
                                     String modelName,
+                                    String personaName,
                                     String reason) {
         return getMaxRetryCount().flatMap(maxRetry -> {
             int currentRetryCount = replyRecord.getSpec().getRetryCount() != null
@@ -233,7 +259,7 @@ public class AiReplyOrchestrator {
                 // Update retryCount and reset status to PENDING
                 return updateRecordForRetry(replyRecord, newRetryCount)
                     .delayElement(Duration.ofSeconds(delaySeconds))
-                    .then(retryGenerate(context, replyRecord, modelName));
+                    .then(retryGenerate(context, replyRecord, modelName, personaName));
             } else {
                 log.warn("[Orchestrator] Max retry count ({}) exceeded for: {}, marking as FAIL. Reason: {}",
                     maxRetry, context.commentId(), reason);
@@ -248,10 +274,11 @@ public class AiReplyOrchestrator {
      */
     private Mono<Void> retryGenerate(ContextExtractor.CommentContext context,
                                       AiCommentReply replyRecord,
-                                      String modelName) {
+                                      String modelName,
+                                      String personaName) {
         return sentimentService.analyzeSentiment(context.commentContent(), modelName)
-            .flatMap(sentimentResult -> promptBuilder.buildPrompt(context, sentimentResult.sentiment())
-                .flatMap(prompt -> generateAndPublish(prompt, context, replyRecord, modelName))
+            .flatMap(sentimentResult -> promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
+                .flatMap(prompt -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
             );
     }
 
@@ -281,11 +308,11 @@ public class AiReplyOrchestrator {
      * Publish the reply and update the record to PASS + published=true.
      */
     private Mono<Void> publishReply(ContextExtractor.CommentContext context, String aiReply,
-                                     AiCommentReply replyRecord, int score) {
+                                     AiCommentReply replyRecord, int score, String personaName) {
         return isAutoPublishEnabled()
             .flatMap(autoPublish -> {
                 return commentReplyPublisher.publishReply(
-                        context.commentId(), aiReply, context.postId(), context.replyTo(), autoPublish)
+                        context.commentId(), aiReply, context.postId(), context.replyTo(), autoPublish, personaName)
                     .flatMap(publishedReply -> {
                         log.info("[Orchestrator] Reply {} for: {}", autoPublish ? "published" : "saved as draft", context.commentId());
                         return updateRecord(replyRecord, aiReply, score, "PASS", autoPublish);
@@ -394,7 +421,78 @@ public class AiReplyOrchestrator {
             .defaultIfEmpty(3);
     }
 
-    private Mono<AiCommentReply> createAiCommentReply(ContextExtractor.CommentContext context, String sentiment) {
+    private Mono<Integer> getMaxConversationRounds() {
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String basicJson = data.get("basic");
+                if (basicJson == null || basicJson.isBlank()) return null;
+                try {
+                    JsonNode node = objectMapper.readTree(basicJson);
+                    if (node.has("maxConversationRounds")) {
+                        return node.get("maxConversationRounds").asInt(8);
+                    }
+                } catch (Exception e) {
+                    log.warn("[Orchestrator] Failed to parse maxConversationRounds from ConfigMap: {}", e.getMessage());
+                }
+                return null;
+            })
+            .onErrorResume(e -> {
+                log.debug("[Orchestrator] Failed to fetch maxConversationRounds setting from ConfigMap: {}", e.getMessage());
+                return Mono.empty();
+            })
+            .defaultIfEmpty(8);
+    }
+
+    private Mono<Integer> getConversationRounds(String commentName) {
+        return client.list(Reply.class,
+                reply -> {
+                    if (!commentName.equals(reply.getSpec().getCommentName())) {
+                        return false;
+                    }
+                    var owner = reply.getSpec().getOwner();
+                    if (owner == null) return false;
+                    // Check AI annotation marker (CommentReplyPublisher sets this on all AI replies)
+                    var annotations = owner.getAnnotations();
+                    return annotations != null
+                        && "true".equals(annotations.get("comment-ai-autopilot.nxxy335.top/is-ai"));
+                },
+                null)
+            .collectList()
+            .map(replies -> replies.size())
+            .onErrorResume(e -> {
+                log.warn("[Orchestrator] Failed to count conversation rounds: {}", e.getMessage());
+                return Mono.just(0);
+            });
+    }
+
+    private Mono<Integer> getRateLimit() {
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String basicJson = data.get("basic");
+                if (basicJson == null || basicJson.isBlank()) return null;
+                try {
+                    JsonNode node = objectMapper.readTree(basicJson);
+                    if (node.has("rateLimitPerMinute")) {
+                        return node.get("rateLimitPerMinute").asInt(10);
+                    }
+                } catch (Exception e) {
+                    log.warn("[Orchestrator] Failed to parse rateLimitPerMinute from ConfigMap: {}", e.getMessage());
+                }
+                return null;
+            })
+            .onErrorResume(e -> {
+                log.debug("[Orchestrator] Failed to fetch rateLimitPerMinute setting from ConfigMap: {}", e.getMessage());
+                return Mono.empty();
+            })
+            .defaultIfEmpty(10);
+    }
+
+    private Mono<AiCommentReply> createAiCommentReply(ContextExtractor.CommentContext context, String sentiment,
+                                                        String personaName) {
         AiCommentReply record = new AiCommentReply();
         record.setMetadata(new Metadata());
         record.getMetadata().setName("ai-reply-" + UUID.randomUUID().toString().substring(0, 8));
@@ -410,6 +508,7 @@ public class AiReplyOrchestrator {
         record.getSpec().setIsAiConversation(context.isAiConversation());
         record.getSpec().setPublished(false);
         record.getSpec().setSentiment(sentiment);
+        record.getSpec().setPersonaName(personaName);
         return client.create(record)
             .doOnSuccess(created -> log.info("[Orchestrator] Created AiCommentReply record: {}",
                 created.getMetadata().getName()));

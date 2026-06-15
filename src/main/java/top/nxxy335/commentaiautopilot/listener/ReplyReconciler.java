@@ -4,6 +4,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.scheduler.Schedulers;
+import run.halo.app.core.extension.content.Comment;
+import run.halo.app.core.extension.content.Post;
 import run.halo.app.core.extension.content.Reply;
 import run.halo.app.extension.ExtensionClient;
 import run.halo.app.extension.controller.Controller;
@@ -27,6 +29,7 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
     private static final String PROCESSED_ANNOTATION = "comment-ai-autopilot.nxxy335.top/processed";
     private static final String AI_PERSONA_OWNER_PREFIX = "ai-persona-";
     private static final String AI_MARKER_ANNOTATION = "comment-ai-autopilot.nxxy335.top/is-ai";
+    private static final String AI_PERSONA_ANNOTATION = "comment-ai-autopilot.nxxy335.top/ai-persona";
 
     // Record the time when this bean was created (plugin startup time)
     private final Instant pluginStartTime = Instant.now();
@@ -109,8 +112,9 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
             client.update(reply);
 
             // Reply to AI → trigger AI reply (conversation continuation)
-            log.info("[ReplyReconciler] Reply to AI detected: {}, triggering conversation", name);
-            orchestrator.processComment(parentCommentName, name, true)
+            String personaName = getPersonaNameFromComment(parentCommentName);
+            log.info("[ReplyReconciler] Reply to AI detected: {}, triggering conversation, personaName: {}", name, personaName);
+            orchestrator.processComment(parentCommentName, name, true, personaName)
                 .subscribeOn(Schedulers.boundedElastic())
                 .subscribe(
                     null,
@@ -140,6 +144,33 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
                 return false;
             })
             .orElse(false);
+    }
+
+    /**
+     * Read persona name from the post's annotations associated with the parent comment.
+     */
+    private String getPersonaNameFromComment(String commentName) {
+        return client.fetch(Comment.class, commentName)
+            .map(comment -> {
+                var subjectRef = comment.getSpec().getSubjectRef();
+                if (subjectRef == null || !"Post".equals(subjectRef.getKind())) {
+                    return null;
+                }
+                String postName = subjectRef.getName();
+                return client.fetch(Post.class, postName)
+                    .map(post -> {
+                        var annotations = post.getMetadata().getAnnotations();
+                        if (annotations != null) {
+                            String persona = annotations.get(AI_PERSONA_ANNOTATION);
+                            if (persona != null && !persona.isBlank()) {
+                                return persona;
+                            }
+                        }
+                        return null;
+                    })
+                    .orElse(null);
+            })
+            .orElse(null);
     }
 
     private boolean isProcessed(Map<String, String> annotations) {

@@ -49,7 +49,7 @@ public class AiReplyCleanupService implements DisposableBean {
                     if (cleanupJson == null || cleanupJson.isBlank()) return true;
                     try {
                         JsonNode node = objectMapper.readTree(cleanupJson);
-                        return node.has("cleanupEnabled") && node.get("cleanupEnabled").asBoolean(true);
+                        return !node.has("cleanupEnabled") || node.get("cleanupEnabled").asBoolean(true);
                     } catch (Exception e) {
                         log.warn("[Cleanup] Failed to parse cleanup config: {}", e.getMessage());
                         return true;

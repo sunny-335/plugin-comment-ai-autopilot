@@ -14,6 +14,7 @@ import run.halo.app.extension.ReactiveExtensionClient;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Component
@@ -151,6 +152,18 @@ public class FilterService {
 
     private boolean isInList(String value, List<String> list) {
         if (value == null || value.isEmpty() || list.isEmpty()) return false;
-        return list.stream().anyMatch(item -> item.equalsIgnoreCase(value));
+        return list.stream().anyMatch(item -> {
+            if (item.startsWith("regex:")) {
+                try {
+                    String regex = item.substring(6);
+                    Pattern pattern = Pattern.compile(regex, Pattern.CASE_INSENSITIVE);
+                    return pattern.matcher(value).matches();
+                } catch (Exception e) {
+                    log.warn("[Filter] Invalid regex pattern '{}': {}", item, e.getMessage());
+                    return false;
+                }
+            }
+            return item.equalsIgnoreCase(value);
+        });
     }
 }

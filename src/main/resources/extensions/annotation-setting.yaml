@@ -12,6 +12,11 @@ spec:
       label: 启用AI回评
       value: true
       help: 开启后，该文章收到评论时将自动触发AI回复
+    - $formkit: text
+      name: comment-ai-autopilot.nxxy335.top/ai-persona
+      label: AI角色
+      help: 选择该文章使用的AI回复角色名称，留空使用默认角色
+      value: ""
 ---
 apiVersion: v1alpha1
 kind: AnnotationSetting
@@ -27,3 +32,8 @@ spec:
       label: 启用AI回评
       value: false
       help: 开启后，该页面收到评论时将自动触发AI回复
+    - $formkit: text
+      name: comment-ai-autopilot.nxxy335.top/ai-persona
+      label: AI角色
+      help: 选择该页面使用的AI回复角色名称，留空使用默认角色
+      value: ""

@@ -1,15 +1,13 @@
 package top.nxxy335.commentaiautopilot.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import run.halo.app.core.extension.content.Comment;
 import run.halo.app.core.extension.content.Reply;
-import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.Metadata;
 import run.halo.app.extension.ReactiveExtensionClient;
+import top.nxxy335.commentaiautopilot.extension.AiPersona;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -23,24 +21,23 @@ import java.util.UUID;
 public class CommentReplyPublisher {
 
     private final ReactiveExtensionClient client;
-    private final ObjectMapper objectMapper;
 
     public CommentReplyPublisher(ReactiveExtensionClient client) {
         this.client = client;
-        this.objectMapper = new ObjectMapper();
     }
 
-    private static final String DEFAULT_PERSONA_NAME = "小回";
     private static final String AI_PERSONA_OWNER_PREFIX = "ai-persona-";
-    private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
     /**
      * Publish a reply to a comment automatically using AI Persona identity.
      * Includes a final dedup check: if an AI reply already exists for this comment,
      * skip publishing to prevent duplicate replies.
+     *
+     * @param personaName the persona name to use (null for default persona)
      */
     public Mono<Reply> publishReply(String parentCommentName, String replyContent,
-                                     String postName, String quoteReplyName, boolean autoPublish) {
+                                     String postName, String quoteReplyName, boolean autoPublish,
+                                     String personaName) {
         return checkExistingAiReply(parentCommentName, quoteReplyName)
             .flatMap(exists -> {
                 if (exists) {
@@ -48,7 +45,7 @@ public class CommentReplyPublisher {
                         parentCommentName);
                     return Mono.empty();
                 }
-                return doPublish(parentCommentName, replyContent, postName, quoteReplyName, autoPublish);
+                return doPublish(parentCommentName, replyContent, postName, quoteReplyName, autoPublish, personaName);
             });
     }
 
@@ -82,109 +79,88 @@ public class CommentReplyPublisher {
     }
 
     private Mono<Reply> doPublish(String parentCommentName, String replyContent,
-                                   String postName, String quoteReplyName, boolean autoPublish) {
-        return getPersonaName().flatMap(personaName ->
-            getPersonaEmail().flatMap(email -> {
-                Reply reply = new Reply();
-                reply.setMetadata(new Metadata());
-                reply.getMetadata().setName(generateReplyName());
-                reply.setSpec(new Reply.ReplySpec());
+                                   String postName, String quoteReplyName, boolean autoPublish,
+                                   String personaName) {
+        return resolvePersona(personaName).flatMap(persona -> {
+            String displayName = persona.displayName();
+            String email = persona.email();
 
-                var spec = reply.getSpec();
-                spec.setCommentName(parentCommentName);
-                spec.setRaw(replyContent);
-                spec.setContent(replyContent);
-                spec.setApproved(autoPublish);
-                if (autoPublish) {
-                    spec.setApprovedTime(Instant.now());
-                }
-                spec.setPriority(0);
-                spec.setTop(false);
-                spec.setAllowNotification(false);
-                spec.setHidden(false);
+            Reply reply = new Reply();
+            reply.setMetadata(new Metadata());
+            reply.getMetadata().setName(generateReplyName());
+            reply.setSpec(new Reply.ReplySpec());
 
-                if (quoteReplyName != null && !quoteReplyName.isBlank()) {
-                    spec.setQuoteReply(quoteReplyName);
-                }
+            var spec = reply.getSpec();
+            spec.setCommentName(parentCommentName);
+            spec.setRaw(replyContent);
+            spec.setContent(replyContent);
+            spec.setApproved(autoPublish);
+            if (autoPublish) {
+                spec.setApprovedTime(Instant.now());
+            }
+            spec.setPriority(0);
+            spec.setTop(false);
+            spec.setAllowNotification(false);
+            spec.setHidden(false);
 
-                var owner = new Comment.CommentOwner();
-                owner.setKind(Comment.CommentOwner.KIND_EMAIL);
-                if (email != null && !email.isBlank()) {
-                    owner.setName(email);
-                } else {
-                    owner.setName(AI_PERSONA_OWNER_PREFIX + personaName);
-                }
-                owner.setDisplayName(personaName + " AI");
+            if (quoteReplyName != null && !quoteReplyName.isBlank()) {
+                spec.setQuoteReply(quoteReplyName);
+            }
 
-                Map<String, String> ownerAnnotations = new HashMap<>();
-                ownerAnnotations.put("comment-ai-autopilot.nxxy335.top/is-ai", "true");
-                if (email != null && !email.isBlank()) {
-                    String gravatarUrl = generateGravatarUrl(email);
-                    ownerAnnotations.put(Comment.CommentOwner.AVATAR_ANNO, gravatarUrl);
-                }
-                owner.setAnnotations(ownerAnnotations);
-                spec.setOwner(owner);
+            var owner = new Comment.CommentOwner();
+            owner.setKind(Comment.CommentOwner.KIND_EMAIL);
+            if (email != null && !email.isBlank()) {
+                owner.setName(email);
+            } else {
+                owner.setName(AI_PERSONA_OWNER_PREFIX + displayName);
+            }
+            owner.setDisplayName(displayName + " AI");
 
-                return client.create(reply)
-                    .doOnSuccess(created -> log.info("[Publisher] AI Persona '{}' reply published for comment: {}, quoteReply: {}",
-                        personaName, parentCommentName, quoteReplyName))
-                    .doOnError(e -> log.error("[Publisher] Failed to publish AI reply: {}", e.getMessage()));
-            })
-        );
+            Map<String, String> ownerAnnotations = new HashMap<>();
+            ownerAnnotations.put("comment-ai-autopilot.nxxy335.top/is-ai", "true");
+            if (email != null && !email.isBlank()) {
+                String gravatarUrl = generateGravatarUrl(email);
+                ownerAnnotations.put(Comment.CommentOwner.AVATAR_ANNO, gravatarUrl);
+            }
+            owner.setAnnotations(ownerAnnotations);
+            spec.setOwner(owner);
+
+            return client.create(reply)
+                .doOnSuccess(created -> log.info("[Publisher] AI Persona '{}' reply published for comment: {}, quoteReply: {}",
+                    displayName, parentCommentName, quoteReplyName))
+                .doOnError(e -> log.error("[Publisher] Failed to publish AI reply: {}", e.getMessage()));
+        });
     }
 
     /**
-     * Read persona setting directly from ConfigMap to avoid ClassLoader conflict.
-     * Halo's ReactiveSettingFetcher returns JsonNode loaded by the main app ClassLoader,
-     * which is incompatible with the plugin's PluginClassLoader, causing ClassCastException.
+     * Resolve persona info from AiPersona extension.
+     * Priority:
+     * 1. If personaName is provided, fetch from AiPersona extension
+     * 2. If personaName is empty, find the default AiPersona (isDefault=true)
+     * 3. If no AiPersona found, return default "小回" with empty email
      */
-    private Mono<String> getPersonaName() {
-        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
-            .mapNotNull(cm -> {
-                var data = cm.getData();
-                if (data == null) return null;
-                String personaJson = data.get("persona");
-                if (personaJson == null || personaJson.isBlank()) return null;
-                try {
-                    JsonNode node = objectMapper.readTree(personaJson);
-                    JsonNode nameNode = node.get("personaName");
-                    if (nameNode != null && !nameNode.asText().isBlank()) {
-                        return nameNode.asText();
-                    }
-                } catch (Exception e) {
-                    log.warn("[Publisher] Failed to parse personaName from ConfigMap: {}", e.getMessage());
-                }
-                return null;
-            })
-            .defaultIfEmpty(DEFAULT_PERSONA_NAME);
+    private Mono<ResolvedPersona> resolvePersona(String personaName) {
+        if (personaName != null && !personaName.isBlank()) {
+            return client.fetch(AiPersona.class, personaName)
+                .map(p -> new ResolvedPersona(
+                    p.getSpec().getDisplayName(),
+                    p.getSpec().getEmail()
+                ))
+                .defaultIfEmpty(new ResolvedPersona("小回", ""));
+        }
+        // Find default persona
+        return client.list(AiPersona.class,
+                persona -> persona.getSpec() != null && Boolean.TRUE.equals(persona.getSpec().getIsDefault()),
+                null)
+            .next()
+            .map(p -> new ResolvedPersona(
+                p.getSpec().getDisplayName(),
+                p.getSpec().getEmail()
+            ))
+            .defaultIfEmpty(new ResolvedPersona("小回", ""));
     }
 
-    /**
-     * Read persona email directly from ConfigMap to avoid ClassLoader conflict.
-     */
-    private Mono<String> getPersonaEmail() {
-        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
-            .mapNotNull(cm -> {
-                var data = cm.getData();
-                if (data == null) return null;
-                String personaJson = data.get("persona");
-                if (personaJson == null || personaJson.isBlank()) return null;
-                try {
-                    JsonNode node = objectMapper.readTree(personaJson);
-                    JsonNode emailNode = node.get("personaEmail");
-                    if (emailNode != null && !emailNode.asText().isBlank()) {
-                        String email = emailNode.asText().trim().toLowerCase();
-                        log.info("[Publisher] personaEmail resolved from ConfigMap: {}", email);
-                        return email;
-                    }
-                    log.info("[Publisher] personaEmail is blank in ConfigMap");
-                } catch (Exception e) {
-                    log.warn("[Publisher] Failed to parse personaEmail from ConfigMap: {}", e.getMessage());
-                }
-                return null;
-            })
-            .defaultIfEmpty("");
-    }
+    private record ResolvedPersona(String displayName, String email) {}
 
     private String generateReplyName() {
         return "ai-comment-reply-" + UUID.randomUUID().toString().substring(0, 8);

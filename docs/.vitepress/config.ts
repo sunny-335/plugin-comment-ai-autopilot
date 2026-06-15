@@ -4,6 +4,7 @@ export default defineConfig({
   title: "AI回评",
   description: "Halo AI回评插件文档",
   lang: "zh-CN",
+  base: "/comment-ai-autopilot/",
   themeConfig: {
     nav: [
       { text: "指南", link: "/guide/introduction" },

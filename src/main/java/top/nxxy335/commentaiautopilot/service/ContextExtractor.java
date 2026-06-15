@@ -51,17 +51,21 @@ public class ContextExtractor {
             String postName = subjectRef.getName();
             return client.fetch(Post.class, postName)
                 .flatMap(post -> getPostContent(postName)
-                    .map(content -> new CommentContext(
-                        comment.getMetadata().getName(),
-                        postName,
-                        post.getSpec().getSlug(),
-                        commentContent,
-                        commentOwner,
-                        post.getSpec().getTitle(),
-                        content,
-                        null,
-                        isAiConversation
-                    ))
+                    .flatMap(content -> getCommentCount(comment.getMetadata().getName())
+                        .map(commentCount -> new CommentContext(
+                            comment.getMetadata().getName(),
+                            postName,
+                            post.getSpec().getSlug(),
+                            commentContent,
+                            commentOwner,
+                            post.getSpec().getTitle(),
+                            content,
+                            null,
+                            isAiConversation,
+                            formatPostDate(post),
+                            commentCount
+                        ))
+                    )
                 )
                 .defaultIfEmpty(new CommentContext(
                     comment.getMetadata().getName(),
@@ -72,7 +76,9 @@ public class ContextExtractor {
                     "",
                     "",
                     null,
-                    isAiConversation
+                    isAiConversation,
+                    "",
+                    0
                 ));
         }
 
@@ -85,7 +91,9 @@ public class ContextExtractor {
             "",
             "",
             null,
-            isAiConversation
+            isAiConversation,
+            "",
+            0
         ));
     }
 
@@ -98,17 +106,21 @@ public class ContextExtractor {
             String postName = subjectRef.getName();
             return client.fetch(Post.class, postName)
                 .flatMap(post -> getPostContent(postName)
-                    .map(content -> new CommentContext(
-                        comment.getMetadata().getName(),
-                        postName,
-                        post.getSpec().getSlug(),
-                        replyContent,
-                        replyOwner,
-                        post.getSpec().getTitle(),
-                        content,
-                        reply.getMetadata().getName(),
-                        isAiConversation
-                    ))
+                    .flatMap(content -> getCommentCount(comment.getMetadata().getName())
+                        .map(commentCount -> new CommentContext(
+                            comment.getMetadata().getName(),
+                            postName,
+                            post.getSpec().getSlug(),
+                            replyContent,
+                            replyOwner,
+                            post.getSpec().getTitle(),
+                            content,
+                            reply.getMetadata().getName(),
+                            isAiConversation,
+                            formatPostDate(post),
+                            commentCount
+                        ))
+                    )
                 )
                 .defaultIfEmpty(new CommentContext(
                     comment.getMetadata().getName(),
@@ -119,7 +131,9 @@ public class ContextExtractor {
                     "",
                     "",
                     reply.getMetadata().getName(),
-                    isAiConversation
+                    isAiConversation,
+                    "",
+                    0
                 ));
         }
 
@@ -132,7 +146,9 @@ public class ContextExtractor {
             "",
             "",
             reply.getMetadata().getName(),
-            isAiConversation
+            isAiConversation,
+            "",
+            0
         ));
     }
 
@@ -197,6 +213,27 @@ public class ContextExtractor {
             .defaultIfEmpty("");
     }
 
+    private String formatPostDate(Post post) {
+        var publishTime = post.getSpec().getPublishTime();
+        if (publishTime != null) {
+            return publishTime.toString().substring(0, 10);
+        }
+        var creationTimestamp = post.getMetadata().getCreationTimestamp();
+        if (creationTimestamp != null) {
+            return creationTimestamp.toString().substring(0, 10);
+        }
+        return "";
+    }
+
+    private Mono<Integer> getCommentCount(String commentName) {
+        return client.list(Reply.class,
+                reply -> commentName.equals(reply.getSpec().getCommentName()),
+                null)
+            .collectList()
+            .map(replies -> replies.size())
+            .defaultIfEmpty(0);
+    }
+
     public record CommentContext(
         String commentId,
         String postId,
@@ -206,6 +243,8 @@ public class ContextExtractor {
         String postTitle,
         String postContent,
         String replyTo,
-        boolean isAiConversation
+        boolean isAiConversation,
+        String postDate,
+        int commentCount
     ) {}
 }
