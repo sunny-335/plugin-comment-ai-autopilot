@@ -41,27 +41,12 @@ public class PromptBuilder {
 【简洁型预设】你的回复应该非常简洁，一两句话即可。不要展开讨论，直接回应评论的核心内容。
 """;
 
-    private static final String PRESET_TECHNICAL = """
-【技术解答型预设】你的回复应该侧重于技术解答，提供准确的技术信息和解决方案。使用专业术语但要解释清楚，必要时提供代码示例或步骤说明。保持逻辑清晰，分点阐述。
-""";
-
-    private static final String PRESET_ENCOURAGING = """
-【鼓励型预设】你的回复应该充满鼓励和正能量，认可评论者的观点和想法。多用肯定性语言，表达对评论者思考的赞赏。即使评论有不足，也要以建设性的方式指出，给予信心和动力。
-""";
-
-    private static final String PRESET_EDUCATIONAL = """
-【知识科普型预设】你的回复应该以科普的方式展开，将复杂概念用通俗易懂的语言解释。适当引用相关知识点，帮助评论者拓宽视野。使用类比和举例让内容更易理解，但避免过于学术化。
-""";
-
     private static final Map<String, String> PRESET_MAP = new LinkedHashMap<>();
     static {
         PRESET_MAP.put("friendly", PRESET_FRIENDLY);
         PRESET_MAP.put("professional", PRESET_PROFESSIONAL);
         PRESET_MAP.put("humorous", PRESET_HUMOROUS);
         PRESET_MAP.put("concise", PRESET_CONCISE);
-        PRESET_MAP.put("technical", PRESET_TECHNICAL);
-        PRESET_MAP.put("encouraging", PRESET_ENCOURAGING);
-        PRESET_MAP.put("educational", PRESET_EDUCATIONAL);
     }
 
     private static final String SAFETY_PROMPT = """
@@ -76,12 +61,7 @@ public class PromptBuilder {
 
             {{safety_prompt}}
 
-            【语言要求】你必须使用与评论相同的语言回复。检测评论的语言特征：
-- 如果评论包含中文字符（汉字），请用中文回复
-- 如果评论包含日文假名（平假名/片假名），请用日文回复
-- 如果评论包含韩文字符，请用韩文回复
-- 如果评论主要是拉丁字母，请根据其语言特征（如英语、法语、西班牙语等）用相同语言回复
-- 绝对不要用与评论不同的语言回复
+            【语言要求】请用评论所使用的语言回复。如果评论是英文，请用英文回复；如果是中文，请用中文回复；如果是日文，请用日文回复；以此类推。
 
             请回复以下评论。注意：
             - 回复长度应与评论长度匹配，简短问候简短回复

@@ -177,6 +177,53 @@
           </div>
         </VCard>
 
+        <!-- Daily Trend -->
+        <VCard :body-class="['!p-5']">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-sm font-medium text-gray-500">近7日回复趋势</h3>
+            <div class="inline-flex rounded-md border border-gray-200 overflow-hidden">
+              <button
+                class="px-2.5 py-1 text-xs transition-colors"
+                :class="range === '7' ? 'bg-blue-500 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'"
+                @click="range = '7'"
+              >
+                7天
+              </button>
+              <button
+                class="px-2.5 py-1 text-xs border-l border-gray-200 transition-colors"
+                :class="range === '30' ? 'bg-blue-500 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'"
+                @click="range = '30'"
+              >
+                30天
+              </button>
+              <button
+                class="px-2.5 py-1 text-xs border-l border-gray-200 transition-colors"
+                :class="range === 'all' ? 'bg-blue-500 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'"
+                @click="range = 'all'"
+              >
+                全部
+              </button>
+            </div>
+          </div>
+          <div v-if="stats?.dailyTrend?.length" class="flex items-end gap-3" style="height: 160px">
+            <div
+              v-for="day in stats.dailyTrend"
+              :key="day.date"
+              class="flex-1 flex flex-col items-center justify-end h-full"
+            >
+              <div class="text-xs text-gray-500 mb-1 font-medium">{{ day.count }}</div>
+              <div
+                class="w-full rounded-t-md transition-all duration-500"
+                :class="day.count > 0 ? 'bg-gradient-to-t from-blue-500 to-blue-400' : 'bg-gray-100'"
+                :style="{ height: getTrendBarHeight(day.count) + 'px' }"
+              ></div>
+              <div class="text-[10px] text-gray-400 mt-2 whitespace-nowrap">{{ formatTrendDate(day.date) }}</div>
+            </div>
+          </div>
+          <div v-else class="flex items-center justify-center text-sm text-gray-400" style="height: 160px">
+            暂无数据
+          </div>
+        </VCard>
       </div>
 
       <!-- Bottom: Score + Quick Actions -->
@@ -252,10 +299,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue"
+import { ref, computed, onMounted, watch } from "vue"
 import { axiosInstance } from "@halo-dev/api-client"
 import { VPageHeader, VButton, VCard, Toast } from "@halo-dev/components"
 import { IconPlug } from "@halo-dev/components"
+
+interface DailyCount {
+  date: string
+  count: number
+}
 
 interface StatsResponse {
   total: number
@@ -264,6 +316,7 @@ interface StatsResponse {
   reviewingCount: number
   avgScore: number
   sentimentDistribution: Record<string, number>
+  dailyTrend: DailyCount[]
 }
 
 interface PersonaResponse {
@@ -278,6 +331,7 @@ interface HealthResponse {
 
 const stats = ref<StatsResponse | null>(null)
 const persona = ref<PersonaResponse | null>(null)
+const range = ref("7")
 const health = ref<HealthResponse | null>(null)
 const healthVisible = ref(true)
 
@@ -303,7 +357,7 @@ const scoreBarColor = computed(() => {
 const fetchStats = async () => {
   try {
     const { data } = await axiosInstance.get(
-      `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/stats?range=7`,
+      `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/stats?range=${range.value}`,
     )
     stats.value = data
   } catch (e) {
@@ -374,6 +428,23 @@ const getSentimentPercent = (sentiment: string): number => {
   if (total === 0) return 0
   return Math.round(((dist[sentiment] || 0) / total) * 100)
 }
+
+const getTrendBarHeight = (count: number): number => {
+  const trend = stats.value?.dailyTrend
+  if (!trend || trend.length === 0) return 0
+  const max = Math.max(...trend.map(d => d.count), 1)
+  return Math.max((count / max) * 100, count > 0 ? 8 : 4)
+}
+
+const formatTrendDate = (dateStr: string): string => {
+  if (!dateStr) return ''
+  const parts = dateStr.split('-')
+  return parts.length >= 3 ? `${parts[1]}/${parts[2]}` : dateStr
+}
+
+watch(range, () => {
+  fetchStats()
+})
 
 onMounted(() => {
   fetchStats()

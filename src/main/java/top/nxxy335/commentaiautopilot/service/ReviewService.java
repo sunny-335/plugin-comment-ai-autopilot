@@ -1,7 +1,6 @@
 package top.nxxy335.commentaiautopilot.service;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
@@ -9,10 +8,10 @@ import reactor.core.publisher.Mono;
 @Slf4j
 public class ReviewService {
 
-    private final ObjectProvider<AiFoundationClient> aiFoundationClientProvider;
+    private final AiFoundationClient aiFoundationClient;
 
-    public ReviewService(ObjectProvider<AiFoundationClient> aiFoundationClientProvider) {
-        this.aiFoundationClientProvider = aiFoundationClientProvider;
+    public ReviewService(AiFoundationClient aiFoundationClient) {
+        this.aiFoundationClient = aiFoundationClient;
     }
 
     private static final String REVIEW_PROMPT_TEMPLATE = """
@@ -37,18 +36,12 @@ public class ReviewService {
 
     public Mono<ReviewResult> review(String articleContent, String commentContent, String aiReply,
                                       String modelName) {
-        AiFoundationClient client = aiFoundationClientProvider.getIfAvailable();
-        if (client == null) {
-            log.warn("AI Foundation plugin is not installed, skipping review (auto-pass)");
-            return Mono.just(new ReviewResult(100, "PASS", "AI Foundation 未安装，自动通过"));
-        }
-
         String reviewPrompt = String.format(REVIEW_PROMPT_TEMPLATE,
             truncate(articleContent, 2000),
             truncate(commentContent, 500),
             truncate(aiReply, 500));
 
-        return client.chat(reviewPrompt, modelName)
+        return aiFoundationClient.chat(reviewPrompt, modelName)
             .map(this::parseSafetyResult)
             .defaultIfEmpty(new ReviewResult(100, "PASS", "审核无响应，自动通过"))
             .onErrorResume(e -> {

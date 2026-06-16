@@ -65,9 +65,6 @@
         placeholder="搜索回复内容..."
         class="rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
       />
-      <input v-model="filterStartDate" type="date" class="rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-      <span class="text-xs text-gray-400">至</span>
-      <input v-model="filterEndDate" type="date" class="rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
       <button
         class="text-xs text-gray-500 hover:text-gray-700"
         @click="resetFilters"
@@ -175,12 +172,6 @@
             </div>
             <div class="flex items-center gap-2">
               <template v-if="reply.spec.status === 'PASS' && !reply.spec.published">
-                <button
-                  class="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 transition-colors px-2 py-1 rounded hover:bg-blue-50"
-                  @click="openEditDialog(reply)"
-                >
-                  编辑
-                </button>
                 <button
                   class="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800 transition-colors px-2 py-1 rounded hover:bg-green-50"
                   @click="handleApprove(reply.metadata.name)"
@@ -308,28 +299,6 @@
         </div>
       </div>
     </teleport>
-
-    <!-- Edit Dialog -->
-    <teleport to="body">
-      <div v-if="showEditDialog" class="fixed inset-0 z-[9999] flex items-center justify-center">
-        <div class="absolute inset-0 bg-black/40" @click="showEditDialog = false"></div>
-        <div class="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col overflow-hidden">
-          <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-            <h3 class="text-base font-semibold text-gray-800">编辑AI回复</h3>
-            <button class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100" @click="showEditDialog = false">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
-            </button>
-          </div>
-          <div class="flex-1 px-5 py-4">
-            <textarea v-model="editContent" rows="8" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-y" placeholder="输入回复内容..."></textarea>
-          </div>
-          <div class="px-5 py-3 border-t border-gray-100 flex justify-end gap-2">
-            <button class="px-4 py-1.5 text-sm text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg" @click="showEditDialog = false">取消</button>
-            <button class="px-4 py-1.5 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50" :disabled="editSaving" @click="saveEdit">{{ editSaving ? '保存中...' : '保存' }}</button>
-          </div>
-        </div>
-      </div>
-    </teleport>
   </div>
 </template>
 
@@ -382,8 +351,6 @@ const selectAll = ref(false)
 const filterStatus = ref("")
 const filterSentiment = ref("")
 const filterKeyword = ref("")
-const filterStartDate = ref("")
-const filterEndDate = ref("")
 
 const toggleSelect = (name: string) => {
   if (selectedNames.value.has(name)) {
@@ -410,12 +377,6 @@ const showDialog = ref(false)
 const conversationLoading = ref(false)
 const conversationMessages = ref<ConversationMessage[]>([])
 
-// Edit dialog state
-const showEditDialog = ref(false)
-const editingReply = ref<AiCommentReplyItem | null>(null)
-const editContent = ref("")
-const editSaving = ref(false)
-
 const fetchReplies = async () => {
   loading.value = true
   try {
@@ -423,8 +384,6 @@ const fetchReplies = async () => {
     if (filterStatus.value) params.status = filterStatus.value
     if (filterSentiment.value) params.sentiment = filterSentiment.value
     if (filterKeyword.value) params.keyword = filterKeyword.value
-    if (filterStartDate.value) params.startDate = filterStartDate.value
-    if (filterEndDate.value) params.endDate = filterEndDate.value
     const { data } = await axiosInstance.get(
       "/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies",
       { params },
@@ -434,7 +393,6 @@ const fetchReplies = async () => {
     totalPages.value = Math.ceil(total.value / size.value)
   } catch (e) {
     console.error("Failed to fetch replies", e)
-    Toast.error("获取回复列表失败")
   } finally {
     loading.value = false
   }
@@ -457,34 +415,10 @@ const openConversation = async (reply: AiCommentReplyItem) => {
   }
 }
 
-const openEditDialog = (reply: AiCommentReplyItem) => {
-  editingReply.value = reply
-  editContent.value = stripHtml(reply.spec.reply || "")
-  showEditDialog.value = true
-}
-
-const saveEdit = async () => {
-  if (!editingReply.value || !editContent.value.trim()) return
-  editSaving.value = true
-  try {
-    await axiosInstance.put(
-      `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${editingReply.value.metadata.name}/content`,
-      { reply: editContent.value }
-    )
-    Toast.success("保存成功")
-    showEditDialog.value = false
-    fetchReplies()
-  } catch (e) {
-    Toast.error("保存失败")
-  } finally {
-    editSaving.value = false
-  }
-}
-
 const handleDelete = async (name: string) => {
   try {
     await axiosInstance.delete(
-      `/apis/comment-ai-autopilot.nxxy335.top/v1alpha1/aicommentreplies/${name}`,
+      `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${name}`,
     )
     Toast.success("删除成功")
     fetchReplies()
@@ -675,13 +609,11 @@ const resetFilters = () => {
   filterStatus.value = ""
   filterSentiment.value = ""
   filterKeyword.value = ""
-  filterStartDate.value = ""
-  filterEndDate.value = ""
   page.value = 1
   fetchReplies()
 }
 
-watch([filterStatus, filterSentiment, filterKeyword, filterStartDate, filterEndDate], () => {
+watch([filterStatus, filterSentiment, filterKeyword], () => {
   page.value = 1
   fetchReplies()
 })

@@ -122,38 +122,26 @@
                 <span>请添加至少一个AI角色</span>
               </div>
               <div v-else class="persona-list">
-                <div v-for="(persona, index) in personas" :key="persona.metadata.name" class="persona-card">
+                <div v-for="p in personas" :key="p.metadata.name" class="persona-card">
                   <div class="persona-card__avatar">
-                    <img v-if="getPersonaAvatar(persona)" :src="getPersonaAvatar(persona)" alt="头像" />
-                    <span v-else class="persona-card__avatar-fallback">{{ (persona.spec.displayName || '?').charAt(0) }}</span>
+                    <img v-if="getPersonaAvatar(p)" :src="getPersonaAvatar(p)" alt="头像" />
+                    <span v-else class="persona-card__avatar-fallback">{{ (p.spec.displayName || '?').charAt(0) }}</span>
                   </div>
                   <div class="persona-card__info">
                     <div class="persona-card__name">
-                      {{ persona.spec.displayName || '未命名' }}
-                      <span v-if="persona.spec.isDefault" class="persona-card__badge">默认</span>
+                      {{ p.spec.displayName || '未命名' }}
+                      <span v-if="p.spec.isDefault" class="persona-card__badge">默认</span>
                     </div>
-                    <div class="persona-card__prompt">{{ persona.spec.prompt || '暂无提示词' }}</div>
+                    <div class="persona-card__prompt">{{ p.spec.prompt || '暂无提示词' }}</div>
                   </div>
                   <div class="persona-card__actions">
-                    <button
-                      class="text-xs text-gray-400 hover:text-gray-600 px-1 py-0.5"
-                      :disabled="index === 0"
-                      @click="movePersonaUp(index)"
-                      title="上移"
-                    >▲</button>
-                    <button
-                      class="text-xs text-gray-400 hover:text-gray-600 px-1 py-0.5"
-                      :disabled="index === personas.length - 1"
-                      @click="movePersonaDown(index)"
-                      title="下移"
-                    >▼</button>
-                    <button class="btn-icon" title="编辑" @click="openPersonaDialog(persona)">
+                    <button class="btn-icon" title="编辑" @click="openPersonaDialog(p)">
                       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
                     </button>
-                    <button v-if="!persona.spec?.isDefault" class="btn-icon btn-icon--danger" title="删除" @click="deletePersona(persona)">
+                    <button v-if="!p.spec?.isDefault" class="btn-icon btn-icon--danger" title="删除" @click="deletePersona(p)">
                       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                     </button>
-                    <button v-if="!persona.spec?.isDefault" class="btn-icon" title="设为默认" @click="setDefaultPersona(persona)">
+                    <button v-if="!p.spec?.isDefault" class="btn-icon" title="设为默认" @click="setDefaultPersona(p)">
                       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>
                     </button>
                   </div>
@@ -444,9 +432,6 @@ const promptPresets = [
   { key: 'professional', label: '专业型', desc: '严谨正式，有逻辑性' },
   { key: 'humorous', label: '幽默型', desc: '轻松诙谐，适当幽默' },
   { key: 'concise', label: '简洁型', desc: '一两句话，简洁明了' },
-  { key: 'technical', label: '技术解答型', desc: '深入浅出，专业解答技术问题' },
-  { key: 'encouraging', label: '鼓励型', desc: '积极正面，给予鼓励和支持' },
-  { key: 'educational', label: '知识科普型', desc: '通俗易懂，普及相关知识' },
 ]
 
 const enabledPresetKeys = computed({
@@ -642,7 +627,6 @@ const fetchPersonas = async () => {
     })
   } catch (e) {
     console.error("Failed to fetch personas", e)
-    Toast.error("获取角色列表失败")
     personas.value = []
   } finally {
     personasLoading.value = false
@@ -727,7 +711,7 @@ const savePersona = async () => {
         isDefault: personaForm.isDefault,
       },
       apiVersion: 'comment-ai-autopilot.nxxy335.top/v1alpha1',
-      kind: 'Persona',
+      kind: 'AiPersona',
       metadata: personaEditing.value
         ? { name: personaEditing.value.metadata.name }
         : { generateName: 'persona-' },
@@ -795,56 +779,6 @@ const setDefaultPersona = async (persona: any) => {
   }
 }
 
-const movePersonaUp = async (index: number) => {
-  if (index <= 0) return
-  const current = personas.value[index]
-  const prev = personas.value[index - 1]
-  // Swap priorities
-  const currentPriority = current.spec?.priority ?? index
-  const prevPriority = prev.spec?.priority ?? (index - 1)
-  try {
-    // Update both personas
-    await Promise.all([
-      axiosInstance.put(
-        `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas/${current.metadata.name}`,
-        { ...current, spec: { ...current.spec, priority: prevPriority } }
-      ),
-      axiosInstance.put(
-        `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas/${prev.metadata.name}`,
-        { ...prev, spec: { ...prev.spec, priority: currentPriority } }
-      )
-    ])
-    Toast.success("排序已更新")
-    fetchPersonas()
-  } catch (e) {
-    Toast.error("排序更新失败")
-  }
-}
-
-const movePersonaDown = async (index: number) => {
-  if (index >= personas.value.length - 1) return
-  const current = personas.value[index]
-  const next = personas.value[index + 1]
-  const currentPriority = current.spec?.priority ?? index
-  const nextPriority = next.spec?.priority ?? (index + 1)
-  try {
-    await Promise.all([
-      axiosInstance.put(
-        `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas/${current.metadata.name}`,
-        { ...current, spec: { ...current.spec, priority: nextPriority } }
-      ),
-      axiosInstance.put(
-        `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas/${next.metadata.name}`,
-        { ...next, spec: { ...next.spec, priority: currentPriority } }
-      )
-    ])
-    Toast.success("排序已更新")
-    fetchPersonas()
-  } catch (e) {
-    Toast.error("排序更新失败")
-  }
-}
-
 // Watch persona dialog email for Gravatar preview
 let emailDebounceTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => personaForm.email, (newEmail) => {
@@ -882,7 +816,7 @@ const fetchSettings = async () => {
       if (Object.keys(prompt).length) { settings.prompt.customPromptTemplate = (prompt.customPromptTemplate as string) || ""; const ep = prompt.enabledPresets; settings.prompt.enabledPresets = Array.isArray(ep) ? ep : (typeof ep === 'string' ? (ep as string).split(",").map((s: string) => s.trim()).filter(Boolean) : []) }
       if (Object.keys(cleanup).length) { settings.cleanup.cleanupEnabled = cleanup.cleanupEnabled !== false; settings.cleanup.retentionDays = (cleanup.retentionDays as number) || 30 }
     }
-  } catch (e) { console.error("Failed to fetch settings", e); Toast.error("获取设置失败") }
+  } catch (e) { console.error("Failed to fetch settings", e) }
   finally { loading.value = false }
 }
 
@@ -921,33 +855,6 @@ onMounted(async () => {
 }
 @media (max-width: 1024px) {
   .settings-container { grid-template-columns: 1fr; }
-}
-@media (max-width: 768px) {
-  .settings-container {
-    grid-template-columns: 1fr !important;
-  }
-  .settings-sidebar {
-    order: -1;
-  }
-  .persona-list {
-    display: flex;
-    flex-direction: column;
-  }
-  .settings-section .form-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .settings-section .form-row__label {
-    min-width: auto;
-    margin-bottom: 4px;
-  }
-  .settings-section .form-input,
-  .settings-section .form-textarea {
-    width: 100%;
-  }
-  .preset-grid {
-    grid-template-columns: 1fr !important;
-  }
 }
 
 /* ===== Section ===== */

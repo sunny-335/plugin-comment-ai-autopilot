@@ -1,7 +1,6 @@
 package top.nxxy335.commentaiautopilot.endpoint;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
@@ -54,17 +53,17 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     private final ReactiveExtensionClient client;
     private final AiReplyOrchestrator orchestrator;
     private final AiReplyCleanupService cleanupService;
-    private final ObjectProvider<AiFoundationClient> aiFoundationClientProvider;
+    private final AiFoundationClient aiFoundationClient;
     private final CommentReplyPublisher commentReplyPublisher;
     private final ObjectMapper objectMapper;
 
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, ObjectProvider<AiFoundationClient> aiFoundationClientProvider, CommentReplyPublisher commentReplyPublisher) {
+    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, AiFoundationClient aiFoundationClient, CommentReplyPublisher commentReplyPublisher) {
         this.client = client;
         this.orchestrator = orchestrator;
         this.cleanupService = cleanupService;
-        this.aiFoundationClientProvider = aiFoundationClientProvider;
+        this.aiFoundationClient = aiFoundationClient;
         this.commentReplyPublisher = commentReplyPublisher;
         this.objectMapper = new ObjectMapper();
     }
@@ -134,8 +133,9 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         final Instant finalStartInstant = startInstant;
         final Instant finalEndInstant = endInstant;
 
-        // Check if we need in-memory filtering (keyword or date range)
-        boolean needsMemoryFilter = !keywordFilter.isBlank() || finalStartInstant != null || finalEndInstant != null;
+        // Check if we need in-memory filtering (keyword, date range, status, or sentiment)
+        boolean needsMemoryFilter = !keywordFilter.isBlank() || finalStartInstant != null || finalEndInstant != null
+            || !statusFilter.isBlank() || !sentimentFilter.isBlank();
 
         if (needsMemoryFilter) {
             // Fall back to listAll + in-memory filter for complex queries
@@ -184,30 +184,18 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                 .flatMap(result -> ServerResponse.ok().bodyValue(result));
         }
 
-        // Simple filters only - use server-side pagination
+        // No filters - use server-side pagination directly
         Sort sort = "asc".equalsIgnoreCase(sortOrder)
             ? Sort.by(Sort.Order.asc("metadata.creationTimestamp"))
             : Sort.by(Sort.Order.desc("metadata.creationTimestamp"));
 
         var listOptions = ListOptions.builder().build();
-        // Note: Halo's ListOptions fieldSelector support may be limited
-        // For status and sentiment, we'll still filter in memory but with paginated data
 
         return client.listBy(AiCommentReply.class, listOptions,
                 PageRequestImpl.of(page - 1, size, sort))
             .map(listResult -> {
-                var items = listResult.getItems();
-                // Apply status/sentiment filter in memory on the current page
-                var filtered = items.stream()
-                    .filter(r -> {
-                        if (!statusFilter.isBlank() && !statusFilter.equals(r.getSpec().getStatus())) return false;
-                        if (!sentimentFilter.isBlank() && !sentimentFilter.equals(r.getSpec().getSentiment())) return false;
-                        return true;
-                    })
-                    .toList();
-
                 Map<String, Object> result = new HashMap<>();
-                result.put("items", filtered);
+                result.put("items", listResult.getItems());
                 result.put("total", listResult.getTotal());
                 result.put("page", page);
                 result.put("size", size);
@@ -438,31 +426,50 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .flatMap(record -> {
                 String replyName = record.getSpec().getReplyName();
                 if (replyName == null || replyName.isBlank()) {
-                    // Draft mode: no Reply extension exists, create one with approved=true
-                    return commentReplyPublisher.publishReply(
-                            record.getSpec().getCommentId(),
-                            record.getSpec().getReply(),
-                            record.getSpec().getPostId(),
-                            record.getSpec().getReplyTo(),
-                            true,
-                            record.getSpec().getPersonaName()
-                        )
-                        .switchIfEmpty(Mono.defer(() -> {
-                            log.warn("[Endpoint] publishReply returned empty for draft approval of {}, AI reply may already exist", name);
-                            return Mono.error(new IllegalStateException("AI回复已存在，无法重复发布"));
-                        }))
-                        .flatMap(publishedReply -> {
-                            String newReplyName = publishedReply.getMetadata().getName();
-                            return client.fetch(AiCommentReply.class, name)
-                                .flatMap(latest -> {
-                                    latest.getSpec().setReplyName(newReplyName);
-                                    latest.getSpec().setPublished(true);
-                                    return client.update(latest);
-                                })
+                    // Draft mode: no Reply extension exists yet.
+                    // First check if a Reply already exists (e.g. from a previous autoPublish=true run)
+                    return findReplyForRecord(record)
+                        .flatMap(existingReply -> {
+                            // Reply already exists, just approve it
+                            existingReply.getSpec().setApproved(true);
+                            existingReply.getSpec().setApprovedTime(Instant.now());
+                            return client.update(existingReply)
                                 .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
-                                    .filter(e -> e instanceof OptimisticLockingFailureException));
+                                    .filter(e -> e instanceof OptimisticLockingFailureException))
+                                .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
+                                    .flatMap(latest -> {
+                                        latest.getSpec().setReplyName(existingReply.getMetadata().getName());
+                                        latest.getSpec().setPublished(true);
+                                        return client.update(latest);
+                                    })
+                                    .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                        .filter(e -> e instanceof OptimisticLockingFailureException))
+                                ))
+                                .then(ServerResponse.ok().bodyValue(Map.of("message", "approved")));
                         })
-                        .then(ServerResponse.ok().bodyValue(Map.of("message", "approved")));
+                        .switchIfEmpty(Mono.defer(() -> {
+                            // No existing Reply found, create a new approved one
+                            return commentReplyPublisher.publishReply(
+                                    record.getSpec().getCommentId(),
+                                    record.getSpec().getReply(),
+                                    record.getSpec().getPostId(),
+                                    record.getSpec().getReplyTo(),
+                                    true,
+                                    record.getSpec().getPersonaName()
+                                )
+                                .flatMap(publishedReply -> {
+                                    String newReplyName = publishedReply.getMetadata().getName();
+                                    return client.fetch(AiCommentReply.class, name)
+                                        .flatMap(latest -> {
+                                            latest.getSpec().setReplyName(newReplyName);
+                                            latest.getSpec().setPublished(true);
+                                            return client.update(latest);
+                                        })
+                                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                            .filter(e -> e instanceof OptimisticLockingFailureException));
+                                })
+                                .then(ServerResponse.ok().bodyValue(Map.of("message", "approved")));
+                        }));
                 } else {
                     // Reply extension already exists, set approved=true
                     return client.fetch(Reply.class, replyName)
@@ -536,27 +543,45 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                             .flatMap(record -> {
                                 String replyName = record.getSpec().getReplyName();
                                 if (replyName == null || replyName.isBlank()) {
-                                    // Draft mode: no Reply extension exists, create one with approved=true
-                                    return commentReplyPublisher.publishReply(
-                                            record.getSpec().getCommentId(),
-                                            record.getSpec().getReply(),
-                                            record.getSpec().getPostId(),
-                                            record.getSpec().getReplyTo(),
-                                            true,
-                                            record.getSpec().getPersonaName()
-                                        )
-                                        .switchIfEmpty(Mono.error(new IllegalStateException("AI回复已存在，无法重复发布")))
-                                        .flatMap(publishedReply -> {
-                                            String newReplyName = publishedReply.getMetadata().getName();
-                                            return client.fetch(AiCommentReply.class, name)
-                                                .flatMap(latest -> {
-                                                    latest.getSpec().setReplyName(newReplyName);
-                                                    latest.getSpec().setPublished(true);
-                                                    return client.update(latest);
-                                                })
+                                    // Draft mode: check if Reply already exists first
+                                    return findReplyForRecord(record)
+                                        .flatMap(existingReply -> {
+                                            existingReply.getSpec().setApproved(true);
+                                            existingReply.getSpec().setApprovedTime(Instant.now());
+                                            return client.update(existingReply)
                                                 .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
-                                                    .filter(e -> e instanceof OptimisticLockingFailureException));
-                                        });
+                                                    .filter(e -> e instanceof OptimisticLockingFailureException))
+                                                .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
+                                                    .flatMap(latest -> {
+                                                        latest.getSpec().setReplyName(existingReply.getMetadata().getName());
+                                                        latest.getSpec().setPublished(true);
+                                                        return client.update(latest);
+                                                    })
+                                                    .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                                        .filter(e -> e instanceof OptimisticLockingFailureException))
+                                                ));
+                                        })
+                                        .switchIfEmpty(Mono.defer(() ->
+                                            commentReplyPublisher.publishReply(
+                                                    record.getSpec().getCommentId(),
+                                                    record.getSpec().getReply(),
+                                                    record.getSpec().getPostId(),
+                                                    record.getSpec().getReplyTo(),
+                                                    true,
+                                                    record.getSpec().getPersonaName()
+                                                )
+                                                .flatMap(publishedReply -> {
+                                                    String newReplyName = publishedReply.getMetadata().getName();
+                                                    return client.fetch(AiCommentReply.class, name)
+                                                        .flatMap(latest -> {
+                                                            latest.getSpec().setReplyName(newReplyName);
+                                                            latest.getSpec().setPublished(true);
+                                                            return client.update(latest);
+                                                        })
+                                                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                                            .filter(e -> e instanceof OptimisticLockingFailureException));
+                                                })
+                                        ));
                                 } else {
                                     // Reply extension already exists, set approved=true
                                     return client.fetch(Reply.class, replyName)
@@ -860,21 +885,10 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     }
 
     private Mono<ServerResponse> health(ServerRequest request) {
-        AiFoundationClient aiClient = aiFoundationClientProvider.getIfAvailable();
-        boolean aiFoundationInstalled = aiClient != null;
-
-        if (!aiFoundationInstalled) {
-            return ServerResponse.ok().bodyValue(
-                new HealthResponse(false, false, false, "", "unhealthy"));
-        }
-
-        // AI Foundation is installed, check if it's enabled and model is available
-        return aiClient.chat("ping", null)
-            .map(response -> (HealthResponse) new HealthResponse(true, true, true, "default", "healthy"))
-            .onErrorResume(e -> {
-                log.debug("Health check: AI Foundation call failed: {}", e.getMessage());
-                return Mono.just(new HealthResponse(true, true, false, "", "degraded"));
-            })
+        // AiFoundationClient is always created; availability is checked at runtime
+        return aiFoundationClient.isAvailable()
+            .map(available -> (HealthResponse) new HealthResponse(available, available, available, "", available ? "healthy" : "degraded"))
+            .defaultIfEmpty(new HealthResponse(false, false, false, "", "unhealthy"))
             .flatMap(health -> ServerResponse.ok().bodyValue(health));
     }
 

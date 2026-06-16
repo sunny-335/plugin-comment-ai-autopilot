@@ -72,6 +72,8 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
 
             String parentCommentName = reply.getSpec().getCommentName();
             if (parentCommentName == null || parentCommentName.isBlank()) {
+                markProcessed(reply);
+                client.update(reply);
                 return;
             }
 
@@ -83,6 +85,8 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
                 // No quoteReply - this is a direct reply to the top-level comment,
                 // NOT a reply to AI. Skip it (CommentReconciler handles top-level comments).
                 log.debug("[ReplyReconciler] Reply {} has no quoteReply, skipping (not a reply to AI)", name);
+                markProcessed(reply);
+                client.update(reply);
                 return;
             }
 
@@ -92,6 +96,8 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
 
             if (!isReplyToAi) {
                 log.debug("[ReplyReconciler] Not a reply to AI, skipping: {}", name);
+                markProcessed(reply);
+                client.update(reply);
                 return;
             }
 

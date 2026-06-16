@@ -60,7 +60,7 @@ public class AiCommentReply extends AbstractExtension {
         @Schema(description = "使用的AI角色名称")
         private String personaName;
 
-        @Schema(description = "关联的Reply扩展名称，草稿模式下为空")
+        @Schema(description = "已发布的回复名称")
         private String replyName;
     }
 }

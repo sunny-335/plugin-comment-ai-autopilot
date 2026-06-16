@@ -5,14 +5,14 @@ plugins {
 }
 
 group 'top.nxxy335.commentaiautopilot'
-version '0.0.0-ygkszvd'
+version '1.0.0-beta.1'
 
 repositories {
     mavenCentral()
 }
 
 dependencies {
-    implementation platform('run.halo.tools.platform:plugin:2.23.0')
+    implementation platform('run.halo.tools.platform:plugin:2.25.0')
     compileOnly 'run.halo.app:api'
     compileOnly files('libs/ai-foundation-api.jar')
     implementation 'org.jsoup:jsoup:1.18.1'
@@ -39,7 +39,7 @@ tasks.withType(JavaCompile).configureEach {
 
 tasks.register('processUiResources', Copy) {
     from project(':ui').layout.buildDirectory.dir('dist')
-    into layout.buildDirectory.dir('resources/main/console')
+    into layout.buildDirectory.dir('resources/main/ui')
     dependsOn project(':ui').tasks.named('assemble')
     shouldRunAfter tasks.named('processResources')
 }
@@ -53,6 +53,6 @@ tasks.named('generatePluginComponentsIdx') {
 }
 
 halo {
-    version = '2.23'
+    version = '2.25'
 }
 

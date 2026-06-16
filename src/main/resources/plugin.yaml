@@ -7,7 +7,7 @@ metadata:
   name: comment-ai-autopilot
 spec:
   enabled: true
-  requires: ">=2.23.0"
+  requires: ">=2.25.0"
   author:
     name: 暖心向阳335
     website: https://nxxy335.top
@@ -22,6 +22,4 @@ spec:
       url: "https://github.com/sunny-335/plugin-comment-ai-autopilot/blob/main/LICENSE"
   settingName: "comment-ai-autopilot-settings"
   configMapName: "comment-ai-autopilot-configmap"
-  version: "0.0.0-ygkszvd"
-  pluginDependencies:
-    ai-foundation: "*"
+  version: "1.0.0-beta.1"

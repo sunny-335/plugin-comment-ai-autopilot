@@ -1,7 +1,6 @@
 package top.nxxy335.commentaiautopilot.service;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
@@ -9,10 +8,10 @@ import reactor.core.publisher.Mono;
 @Slf4j
 public class SentimentService {
 
-    private final ObjectProvider<AiFoundationClient> aiFoundationClientProvider;
+    private final AiFoundationClient aiFoundationClient;
 
-    public SentimentService(ObjectProvider<AiFoundationClient> aiFoundationClientProvider) {
-        this.aiFoundationClientProvider = aiFoundationClientProvider;
+    public SentimentService(AiFoundationClient aiFoundationClient) {
+        this.aiFoundationClient = aiFoundationClient;
     }
 
     public record SentimentResult(String sentiment, double confidence) {
@@ -22,15 +21,9 @@ public class SentimentService {
     }
 
     public Mono<SentimentResult> analyzeSentiment(String commentContent, String modelName) {
-        AiFoundationClient client = aiFoundationClientProvider.getIfAvailable();
-        if (client == null) {
-            log.warn("[Sentiment] AI Foundation plugin is not installed, defaulting to NEUTRAL");
-            return Mono.just(new SentimentResult(SentimentResult.NEUTRAL, 0.0));
-        }
-
         String prompt = buildSentimentPrompt(commentContent);
 
-        return client.chat(prompt, modelName)
+        return aiFoundationClient.chat(prompt, modelName)
             .map(response -> {
                 String sentiment = parseSentiment(response);
                 return new SentimentResult(sentiment, 1.0);
