@@ -5,6 +5,11 @@
         <IconPlug class="mr-2 self-center" />
       </template>
       <template #actions>
+        <VButton type="secondary" size="sm" @click="exportConfig">导出配置</VButton>
+        <label class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 cursor-pointer transition-colors">
+          导入配置
+          <input type="file" accept=".json" class="hidden" @change="handleImportFile" />
+        </label>
         <VButton @click="$router.push({ name: 'CommentAiAutopilot' })">返回概览</VButton>
       </template>
     </VPageHeader>
@@ -117,26 +122,38 @@
                 <span>请添加至少一个AI角色</span>
               </div>
               <div v-else class="persona-list">
-                <div v-for="p in personas" :key="p.metadata.name" class="persona-card">
+                <div v-for="(persona, index) in personas" :key="persona.metadata.name" class="persona-card">
                   <div class="persona-card__avatar">
-                    <img v-if="getPersonaAvatar(p)" :src="getPersonaAvatar(p)" alt="头像" />
-                    <span v-else class="persona-card__avatar-fallback">{{ (p.spec.displayName || '?').charAt(0) }}</span>
+                    <img v-if="getPersonaAvatar(persona)" :src="getPersonaAvatar(persona)" alt="头像" />
+                    <span v-else class="persona-card__avatar-fallback">{{ (persona.spec.displayName || '?').charAt(0) }}</span>
                   </div>
                   <div class="persona-card__info">
                     <div class="persona-card__name">
-                      {{ p.spec.displayName || '未命名' }}
-                      <span v-if="p.spec.isDefault" class="persona-card__badge">默认</span>
+                      {{ persona.spec.displayName || '未命名' }}
+                      <span v-if="persona.spec.isDefault" class="persona-card__badge">默认</span>
                     </div>
-                    <div class="persona-card__prompt">{{ p.spec.prompt || '暂无提示词' }}</div>
+                    <div class="persona-card__prompt">{{ persona.spec.prompt || '暂无提示词' }}</div>
                   </div>
                   <div class="persona-card__actions">
-                    <button class="btn-icon" title="编辑" @click="openPersonaDialog(p)">
+                    <button
+                      class="text-xs text-gray-400 hover:text-gray-600 px-1 py-0.5"
+                      :disabled="index === 0"
+                      @click="movePersonaUp(index)"
+                      title="上移"
+                    >▲</button>
+                    <button
+                      class="text-xs text-gray-400 hover:text-gray-600 px-1 py-0.5"
+                      :disabled="index === personas.length - 1"
+                      @click="movePersonaDown(index)"
+                      title="下移"
+                    >▼</button>
+                    <button class="btn-icon" title="编辑" @click="openPersonaDialog(persona)">
                       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
                     </button>
-                    <button v-if="!p.spec?.isDefault" class="btn-icon btn-icon--danger" title="删除" @click="deletePersona(p)">
+                    <button v-if="!persona.spec?.isDefault" class="btn-icon btn-icon--danger" title="删除" @click="deletePersona(persona)">
                       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                     </button>
-                    <button v-if="!p.spec?.isDefault" class="btn-icon" title="设为默认" @click="setDefaultPersona(p)">
+                    <button v-if="!persona.spec?.isDefault" class="btn-icon" title="设为默认" @click="setDefaultPersona(persona)">
                       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>
                     </button>
                   </div>
@@ -313,10 +330,13 @@
             <span>暂无评论者数据</span>
           </div>
           <div v-else class="dialog__list">
-            <button v-for="c in filteredCommenters" :key="c.name + c.email" class="dialog__item" @click="addCommenter(c)">
-              <div class="dialog__item-avatar">{{ c.name?.charAt(0) || '?' }}</div>
+            <button v-for="c in filteredCommenters" :key="c.displayName + c.email" class="dialog__item" @click="addCommenter(c)">
+              <div class="dialog__item-avatar">
+                <img v-if="c.avatarUrl" :src="c.avatarUrl" alt="" class="w-full h-full object-cover rounded-full" />
+                <span v-else>{{ c.displayName?.charAt(0) || '?' }}</span>
+              </div>
               <div class="dialog__item-info">
-                <div class="dialog__item-name">{{ c.name }}</div>
+                <div class="dialog__item-name">{{ c.displayName }}</div>
                 <div v-if="c.email" class="dialog__item-email">{{ c.email }}</div>
               </div>
               <svg class="dialog__item-add" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
@@ -339,10 +359,10 @@
           <!-- Avatar Preview -->
           <div class="persona-dialog-preview">
             <div class="persona-card__avatar">
-              <img v-if="personaDialogAvatar" :src="personaDialogAvatar" alt="头像" />
+              <img v-if="personaDialogAvatar" :src="personaDialogAvatar" alt="Gravatar头像" />
               <span v-else class="persona-card__avatar-fallback">{{ (personaForm.displayName || '?').charAt(0) }}</span>
             </div>
-            <div style="font-size:13px;color:#6b7280">Gravatar头像预览</div>
+            <div style="font-size:13px;color:#6b7280">{{ personaDialogAvatar ? 'Gravatar头像预览' : '未设置邮箱，将使用默认头像' }}</div>
           </div>
           <!-- Nickname -->
           <div class="form-field">
@@ -382,13 +402,31 @@
         </div>
       </div>
     </div>
+
+    <!-- 导入确认对话框 -->
+    <VModal v-model:visible="showImportConfirm" title="确认导入配置">
+      <div class="space-y-3">
+        <p class="text-sm text-gray-600">导入将覆盖当前配置，此操作不可撤销。确定要继续吗？</p>
+        <div v-if="importFileData" class="text-xs text-gray-500">
+          <p v-if="importFileData.configMap">- 包含插件设置</p>
+          <p v-if="importFileData.personas">- 包含 {{ importFileData.personas.length }} 个AI角色</p>
+        </div>
+      </div>
+      <template #footer>
+        <VSpace>
+          <VButton @click="showImportConfirm = false">取消</VButton>
+          <VButton type="primary" :loading="importLoading" @click="confirmImport">确认导入</VButton>
+        </VSpace>
+      </template>
+    </VModal>
+
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from "vue"
-import { axiosInstance } from "@halo-dev/api-client"
-import { VPageHeader, VButton, VLoading, Toast } from "@halo-dev/components"
+import { axiosInstance, coreApiClient } from "@halo-dev/api-client"
+import { VPageHeader, VButton, VLoading, Toast, VModal, VSpace } from "@halo-dev/components"
 import { IconPlug } from "@halo-dev/components"
 
 const promptVariables = [
@@ -406,6 +444,9 @@ const promptPresets = [
   { key: 'professional', label: '专业型', desc: '严谨正式，有逻辑性' },
   { key: 'humorous', label: '幽默型', desc: '轻松诙谐，适当幽默' },
   { key: 'concise', label: '简洁型', desc: '一两句话，简洁明了' },
+  { key: 'technical', label: '技术解答型', desc: '深入浅出，专业解答技术问题' },
+  { key: 'encouraging', label: '鼓励型', desc: '积极正面，给予鼓励和支持' },
+  { key: 'educational', label: '知识科普型', desc: '通俗易懂，普及相关知识' },
 ]
 
 const enabledPresetKeys = computed({
@@ -434,7 +475,7 @@ const isPresetEnabled = (key: string) => enabledPresetKeys.value.includes(key)
 const loading = ref(false)
 const saving = ref(false)
 const showCommenterDialog = ref(false)
-const commenterList = ref<{ name: string; email: string }[]>([])
+const commenterList = ref<{ displayName: string; email: string; avatarUrl: string }[]>([])
 const commenterSearch = ref("")
 const commenterLoading = ref(false)
 const cleanupLoading = ref(false)
@@ -455,7 +496,6 @@ const personaForm = reactive({
   isDefault: false,
 })
 const personaDialogAvatar = ref('')
-let personaAvatarDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const settings = reactive({
   basic: { autoReply: true, autoPublish: true, maxRetryCount: 3, blockedCommenters: "", maxConversationRounds: 8, rateLimitPerMinute: 10 },
@@ -465,6 +505,72 @@ const settings = reactive({
 })
 
 const configMapName = "comment-ai-autopilot-configmap"
+const apiBase = "/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1"
+
+// ===== Export / Import =====
+const exportConfig = async () => {
+  try {
+    const { data } = await axiosInstance.get(`${apiBase}/export`)
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `comment-ai-autopilot-config-${new Date().toISOString().slice(0, 10)}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    Toast.success('配置已导出')
+  } catch (e) {
+    console.error('Failed to export config', e)
+    Toast.error('导出配置失败')
+  }
+}
+
+const importLoading = ref(false)
+const showImportConfirm = ref(false)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const importFileData = ref<any>(null)
+
+const handleImportFile = (event: Event) => {
+  const input = event.target as HTMLInputElement
+  if (!input.files || input.files.length === 0) return
+  const file = input.files[0]
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target?.result as string)
+      if (!data.configMap && !data.personas) {
+        Toast.error('无效的配置文件格式')
+        return
+      }
+      importFileData.value = data
+      showImportConfirm.value = true
+    } catch {
+      Toast.error('无法解析配置文件')
+    }
+  }
+  reader.readAsText(file)
+  // 重置 input 以允许重复选择同一文件
+  input.value = ''
+}
+
+const confirmImport = async () => {
+  if (!importFileData.value) return
+  importLoading.value = true
+  try {
+    await axiosInstance.post(`${apiBase}/import`, importFileData.value)
+    Toast.success('配置已导入')
+    showImportConfirm.value = false
+    importFileData.value = null
+    // 刷新数据
+    await fetchPersonas()
+    await computePersonaAvatars()
+  } catch (e) {
+    console.error('Failed to import config', e)
+    Toast.error('导入配置失败')
+  } finally {
+    importLoading.value = false
+  }
+}
 
 const openCommenterDialog = async () => {
   showCommenterDialog.value = true
@@ -485,11 +591,11 @@ const openCommenterDialog = async () => {
 const filteredCommenters = computed(() => {
   const kw = commenterSearch.value.trim().toLowerCase()
   if (!kw) return commenterList.value
-  return commenterList.value.filter(c => c.name.toLowerCase().includes(kw) || (c.email && c.email.toLowerCase().includes(kw)))
+  return commenterList.value.filter(c => c.displayName.toLowerCase().includes(kw) || (c.email && c.email.toLowerCase().includes(kw)))
 })
 
-const addCommenter = (commenter: { name: string; email: string }) => {
-  const value = commenter.email || commenter.name
+const addCommenter = (commenter: { displayName: string; email: string }) => {
+  const value = commenter.email || commenter.displayName
   if (!value) return
   const current = settings.basic.blockedCommenters.split(",").map(s => s.trim()).filter(Boolean)
   if (current.includes(value)) { Toast.info("该评论者已在黑名单中"); return }
@@ -501,9 +607,11 @@ const addCommenter = (commenter: { name: string; email: string }) => {
 
 const computeGravatarHash = async (email: string): Promise<string> => {
   const normalized = email.trim().toLowerCase()
-  const data = new TextEncoder().encode(normalized)
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data)
-  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("")
+  const encoder = new TextEncoder()
+  const data = encoder.encode(normalized)
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
 const performCleanup = async () => {
@@ -526,6 +634,7 @@ const fetchPersonas = async () => {
     const { data } = await axiosInstance.get(personasApiBase)
     const list = Array.isArray(data) ? data : (data.items || [])
     // 默认角色排到最上方
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     personas.value = list.sort((a: any, b: any) => {
       if (a.spec?.isDefault && !b.spec?.isDefault) return -1
       if (!a.spec?.isDefault && b.spec?.isDefault) return 1
@@ -533,6 +642,7 @@ const fetchPersonas = async () => {
     })
   } catch (e) {
     console.error("Failed to fetch personas", e)
+    Toast.error("获取角色列表失败")
     personas.value = []
   } finally {
     personasLoading.value = false
@@ -542,7 +652,6 @@ const fetchPersonas = async () => {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const getPersonaAvatar = (persona: any) => {
   if (persona.spec?.email) {
-    // Compute synchronously from cached hash if available
     return persona._avatarUrl || ''
   }
   return ''
@@ -563,7 +672,7 @@ const computePersonaAvatars = async () => {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const openPersonaDialog = (persona: any | null) => {
+const openPersonaDialog = async (persona: any | null) => {
   personaEditing.value = persona
   if (persona) {
     personaForm.displayName = persona.spec.displayName || ''
@@ -578,9 +687,10 @@ const openPersonaDialog = (persona: any | null) => {
   }
   personaDialogAvatar.value = ''
   if (personaForm.email) {
-    computeGravatarHash(personaForm.email).then(hash => {
+    try {
+      const hash = await computeGravatarHash(personaForm.email)
       personaDialogAvatar.value = `https://cn.cravatar.com/avatar/${hash}`
-    }).catch(() => { personaDialogAvatar.value = '' })
+    } catch { personaDialogAvatar.value = '' }
   }
   showPersonaDialog.value = true
 }
@@ -662,6 +772,7 @@ const deletePersona = async (persona: any) => {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const setDefaultPersona = async (persona: any) => {
   try {
     // 先取消当前默认角色：获取最新数据后更新
@@ -684,11 +795,62 @@ const setDefaultPersona = async (persona: any) => {
   }
 }
 
+const movePersonaUp = async (index: number) => {
+  if (index <= 0) return
+  const current = personas.value[index]
+  const prev = personas.value[index - 1]
+  // Swap priorities
+  const currentPriority = current.spec?.priority ?? index
+  const prevPriority = prev.spec?.priority ?? (index - 1)
+  try {
+    // Update both personas
+    await Promise.all([
+      axiosInstance.put(
+        `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas/${current.metadata.name}`,
+        { ...current, spec: { ...current.spec, priority: prevPriority } }
+      ),
+      axiosInstance.put(
+        `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas/${prev.metadata.name}`,
+        { ...prev, spec: { ...prev.spec, priority: currentPriority } }
+      )
+    ])
+    Toast.success("排序已更新")
+    fetchPersonas()
+  } catch (e) {
+    Toast.error("排序更新失败")
+  }
+}
+
+const movePersonaDown = async (index: number) => {
+  if (index >= personas.value.length - 1) return
+  const current = personas.value[index]
+  const next = personas.value[index + 1]
+  const currentPriority = current.spec?.priority ?? index
+  const nextPriority = next.spec?.priority ?? (index + 1)
+  try {
+    await Promise.all([
+      axiosInstance.put(
+        `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas/${current.metadata.name}`,
+        { ...current, spec: { ...current.spec, priority: nextPriority } }
+      ),
+      axiosInstance.put(
+        `/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas/${next.metadata.name}`,
+        { ...next, spec: { ...next.spec, priority: currentPriority } }
+      )
+    ])
+    Toast.success("排序已更新")
+    fetchPersonas()
+  } catch (e) {
+    Toast.error("排序更新失败")
+  }
+}
+
 // Watch persona dialog email for Gravatar preview
+let emailDebounceTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => personaForm.email, (newEmail) => {
-  if (personaAvatarDebounceTimer) clearTimeout(personaAvatarDebounceTimer)
+  if (emailDebounceTimer) clearTimeout(emailDebounceTimer)
   if (!newEmail || !newEmail.trim()) { personaDialogAvatar.value = ''; return }
-  personaAvatarDebounceTimer = setTimeout(async () => {
+  emailDebounceTimer = setTimeout(async () => {
     try {
       const hash = await computeGravatarHash(newEmail)
       personaDialogAvatar.value = `https://cn.cravatar.com/avatar/${hash}`
@@ -696,28 +858,47 @@ watch(() => personaForm.email, (newEmail) => {
   }, 500)
 })
 
+const parseConfigSection = (data: Record<string, unknown>, key: string): Record<string, unknown> => {
+  const val = data[key]
+  if (!val) return {}
+  if (typeof val === 'string') {
+    try { return JSON.parse(val) } catch { return {} }
+  }
+  return val as Record<string, unknown>
+}
+
 const fetchSettings = async () => {
   loading.value = true
   try {
-    const { data } = await axiosInstance.get(`/api/v1alpha1/configmaps/${configMapName}`)
+    const { data } = await coreApiClient.configMap.getConfigMap({ name: configMapName })
     if (data.data) {
-      const d = data.data
-      if (d.basic) { settings.basic.autoReply = d.basic.autoReply !== false; settings.basic.autoPublish = d.basic.autoPublish !== false; settings.basic.maxRetryCount = d.basic.maxRetryCount || 3; settings.basic.blockedCommenters = d.basic.blockedCommenters || ""; settings.basic.maxConversationRounds = d.basic.maxConversationRounds || 8; settings.basic.rateLimitPerMinute = d.basic.rateLimitPerMinute || 10 }
-      if (d.model) { settings.model.modelName = d.model.modelName || "" }
-      if (d.prompt) { settings.prompt.customPromptTemplate = d.prompt.customPromptTemplate || ""; settings.prompt.enabledPresets = Array.isArray(d.prompt.enabledPresets) ? d.prompt.enabledPresets : (d.prompt.enabledPresets || "").split(",").map((s: string) => s.trim()).filter(Boolean) }
-      if (d.cleanup) { settings.cleanup.cleanupEnabled = d.cleanup.cleanupEnabled !== false; settings.cleanup.retentionDays = d.cleanup.retentionDays || 30 }
+      const d = data.data as Record<string, unknown>
+      const basic = parseConfigSection(d, 'basic') as Record<string, unknown>
+      const model = parseConfigSection(d, 'model') as Record<string, unknown>
+      const prompt = parseConfigSection(d, 'prompt') as Record<string, unknown>
+      const cleanup = parseConfigSection(d, 'cleanup') as Record<string, unknown>
+      if (Object.keys(basic).length) { settings.basic.autoReply = basic.autoReply !== false; settings.basic.autoPublish = basic.autoPublish !== false; settings.basic.maxRetryCount = (basic.maxRetryCount as number) || 3; settings.basic.blockedCommenters = (basic.blockedCommenters as string) || ""; settings.basic.maxConversationRounds = (basic.maxConversationRounds as number) || 8; settings.basic.rateLimitPerMinute = (basic.rateLimitPerMinute as number) || 10 }
+      if (Object.keys(model).length) { settings.model.modelName = (model.modelName as string) || "" }
+      if (Object.keys(prompt).length) { settings.prompt.customPromptTemplate = (prompt.customPromptTemplate as string) || ""; const ep = prompt.enabledPresets; settings.prompt.enabledPresets = Array.isArray(ep) ? ep : (typeof ep === 'string' ? (ep as string).split(",").map((s: string) => s.trim()).filter(Boolean) : []) }
+      if (Object.keys(cleanup).length) { settings.cleanup.cleanupEnabled = cleanup.cleanupEnabled !== false; settings.cleanup.retentionDays = (cleanup.retentionDays as number) || 30 }
     }
-  } catch (e) { console.error("Failed to fetch settings", e) }
+  } catch (e) { console.error("Failed to fetch settings", e); Toast.error("获取设置失败") }
   finally { loading.value = false }
 }
 
 const saveSettings = async () => {
   saving.value = true
   try {
-    const { data: latest } = await axiosInstance.get(`/api/v1alpha1/configmaps/${configMapName}`)
+    const { data: latest } = await coreApiClient.configMap.getConfigMap({ name: configMapName })
     const updated = { ...latest }
-    updated.data = { ...updated.data, basic: { ...settings.basic }, model: { ...settings.model }, prompt: { ...settings.prompt }, cleanup: { ...settings.cleanup } }
-    await axiosInstance.put(`/api/v1alpha1/configmaps/${configMapName}`, updated)
+    updated.data = {
+      ...updated.data,
+      basic: JSON.stringify(settings.basic),
+      model: JSON.stringify(settings.model),
+      prompt: JSON.stringify(settings.prompt),
+      cleanup: JSON.stringify(settings.cleanup),
+    }
+    await coreApiClient.configMap.updateConfigMap({ name: configMapName, configMap: updated })
     Toast.success("设置已保存")
   } catch (e) { console.error("Failed to save settings", e); Toast.error("保存设置失败") }
   finally { saving.value = false }
@@ -740,6 +921,33 @@ onMounted(async () => {
 }
 @media (max-width: 1024px) {
   .settings-container { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .settings-container {
+    grid-template-columns: 1fr !important;
+  }
+  .settings-sidebar {
+    order: -1;
+  }
+  .persona-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .settings-section .form-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .settings-section .form-row__label {
+    min-width: auto;
+    margin-bottom: 4px;
+  }
+  .settings-section .form-input,
+  .settings-section .form-textarea {
+    width: 100%;
+  }
+  .preset-grid {
+    grid-template-columns: 1fr !important;
+  }
 }
 
 /* ===== Section ===== */

@@ -5,7 +5,7 @@ plugins {
 }
 
 group 'top.nxxy335.commentaiautopilot'
-version '0.0.1-t5w8r3'
+version '0.0.0-ygkszvd'
 
 repositories {
     mavenCentral()

@@ -13,8 +13,10 @@ import run.halo.app.core.extension.content.Post;
 import run.halo.app.core.extension.content.Reply;
 import run.halo.app.core.extension.endpoint.CustomEndpoint;
 import run.halo.app.extension.ConfigMap;
+import run.halo.app.extension.Metadata;
 import run.halo.app.extension.GroupVersion;
 import run.halo.app.extension.ListOptions;
+import run.halo.app.extension.ListResult;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.app.extension.PageRequestImpl;
 import top.nxxy335.commentaiautopilot.extension.AiCommentReply;
@@ -22,11 +24,15 @@ import top.nxxy335.commentaiautopilot.extension.AiPersona;
 import top.nxxy335.commentaiautopilot.service.AiFoundationClient;
 import top.nxxy335.commentaiautopilot.service.AiReplyCleanupService;
 import top.nxxy335.commentaiautopilot.service.AiReplyOrchestrator;
+import top.nxxy335.commentaiautopilot.service.CommentReplyPublisher;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Sort;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -49,15 +55,17 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     private final AiReplyOrchestrator orchestrator;
     private final AiReplyCleanupService cleanupService;
     private final ObjectProvider<AiFoundationClient> aiFoundationClientProvider;
+    private final CommentReplyPublisher commentReplyPublisher;
     private final ObjectMapper objectMapper;
 
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, ObjectProvider<AiFoundationClient> aiFoundationClientProvider) {
+    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, ObjectProvider<AiFoundationClient> aiFoundationClientProvider, CommentReplyPublisher commentReplyPublisher) {
         this.client = client;
         this.orchestrator = orchestrator;
         this.cleanupService = cleanupService;
         this.aiFoundationClientProvider = aiFoundationClientProvider;
+        this.commentReplyPublisher = commentReplyPublisher;
         this.objectMapper = new ObjectMapper();
     }
 
@@ -84,6 +92,12 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .POST("/personas", this::createPersona)
             .PUT("/personas/{name}", this::updatePersona)
             .DELETE("/personas/{name}", this::deletePersona)
+            // 导出配置
+            .GET("/export", this::exportConfig)
+            // 导入配置
+            .POST("/import", this::importConfig)
+            // 更新草稿回复内容（同时更新 AiCommentReply 和 Reply 扩展）
+            .PUT("/replies/{name}/content", this::updateReplyContent)
             .build();
     }
 
@@ -98,48 +112,108 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         var statusFilter = request.queryParam("status").orElse("");
         var sentimentFilter = request.queryParam("sentiment").orElse("");
         var keywordFilter = request.queryParam("keyword").orElse("");
+        var startDateStr = request.queryParam("startDate").orElse("");
+        var endDateStr = request.queryParam("endDate").orElse("");
+        var sortOrder = request.queryParam("sortOrder").orElse("desc");
 
-        return client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
-            .collectList()
-            .map(replies -> {
-                var filtered = replies.stream()
-                    .filter(r -> {
-                        if (!statusFilter.isBlank()
-                            && !statusFilter.equals(r.getSpec().getStatus())) {
-                            return false;
-                        }
-                        if (!sentimentFilter.isBlank()
-                            && !sentimentFilter.equals(r.getSpec().getSentiment())) {
-                            return false;
-                        }
-                        if (!keywordFilter.isBlank()) {
-                            String reply = r.getSpec().getReply();
-                            if (reply == null || !reply.contains(keywordFilter)) {
-                                return false;
+        // Parse date filters
+        DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        ZoneId zoneId = ZoneId.systemDefault();
+        Instant startInstant = null;
+        Instant endInstant = null;
+        try {
+            if (!startDateStr.isBlank()) {
+                startInstant = LocalDate.parse(startDateStr, dateFormatter).atStartOfDay(zoneId).toInstant();
+            }
+            if (!endDateStr.isBlank()) {
+                endInstant = LocalDate.parse(endDateStr, dateFormatter).plusDays(1).atStartOfDay(zoneId).toInstant();
+            }
+        } catch (Exception e) {
+            log.warn("Failed to parse date filter: {}", e.getMessage());
+        }
+        final Instant finalStartInstant = startInstant;
+        final Instant finalEndInstant = endInstant;
+
+        // Check if we need in-memory filtering (keyword or date range)
+        boolean needsMemoryFilter = !keywordFilter.isBlank() || finalStartInstant != null || finalEndInstant != null;
+
+        if (needsMemoryFilter) {
+            // Fall back to listAll + in-memory filter for complex queries
+            return client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
+                .collectList()
+                .map(replies -> {
+                    var filtered = replies.stream()
+                        .filter(r -> {
+                            if (!statusFilter.isBlank() && !statusFilter.equals(r.getSpec().getStatus())) return false;
+                            if (!sentimentFilter.isBlank() && !sentimentFilter.equals(r.getSpec().getSentiment())) return false;
+                            if (!keywordFilter.isBlank()) {
+                                String reply = r.getSpec().getReply();
+                                if (reply == null || !reply.contains(keywordFilter)) return false;
                             }
-                        }
+                            if (finalStartInstant != null || finalEndInstant != null) {
+                                Instant creationTs = r.getMetadata().getCreationTimestamp();
+                                if (creationTs == null) return false;
+                                if (finalStartInstant != null && creationTs.isBefore(finalStartInstant)) return false;
+                                if (finalEndInstant != null && !creationTs.isBefore(finalEndInstant)) return false;
+                            }
+                            return true;
+                        })
+                        .sorted(Comparator.comparing(
+                            (AiCommentReply r) -> r.getMetadata().getCreationTimestamp(),
+                            Comparator.nullsLast("asc".equalsIgnoreCase(sortOrder)
+                                ? Comparator.<Instant>naturalOrder() : Comparator.<Instant>reverseOrder())
+                        ))
+                        .toList();
+
+                    int total = filtered.size();
+                    int fromIndex = (page - 1) * size;
+                    int toIndex = Math.min(fromIndex + size, total);
+                    List<AiCommentReply> pageContent = fromIndex < total
+                        ? filtered.subList(fromIndex, toIndex) : List.of();
+
+                    Map<String, Object> result = new HashMap<>();
+                    result.put("items", pageContent);
+                    result.put("total", total);
+                    result.put("page", page);
+                    result.put("size", size);
+                    result.put("totalPages", (int) Math.ceil((double) total / size));
+                    result.put("first", page == 1);
+                    result.put("last", toIndex >= total);
+                    return result;
+                })
+                .flatMap(result -> ServerResponse.ok().bodyValue(result));
+        }
+
+        // Simple filters only - use server-side pagination
+        Sort sort = "asc".equalsIgnoreCase(sortOrder)
+            ? Sort.by(Sort.Order.asc("metadata.creationTimestamp"))
+            : Sort.by(Sort.Order.desc("metadata.creationTimestamp"));
+
+        var listOptions = ListOptions.builder().build();
+        // Note: Halo's ListOptions fieldSelector support may be limited
+        // For status and sentiment, we'll still filter in memory but with paginated data
+
+        return client.listBy(AiCommentReply.class, listOptions,
+                PageRequestImpl.of(page - 1, size, sort))
+            .map(listResult -> {
+                var items = listResult.getItems();
+                // Apply status/sentiment filter in memory on the current page
+                var filtered = items.stream()
+                    .filter(r -> {
+                        if (!statusFilter.isBlank() && !statusFilter.equals(r.getSpec().getStatus())) return false;
+                        if (!sentimentFilter.isBlank() && !sentimentFilter.equals(r.getSpec().getSentiment())) return false;
                         return true;
                     })
-                    .sorted(Comparator.comparing(
-                        (AiCommentReply r) -> r.getMetadata().getCreationTimestamp(),
-                        Comparator.nullsLast(Comparator.reverseOrder())
-                    ))
                     .toList();
 
-                int total = filtered.size();
-                int fromIndex = (page - 1) * size;
-                int toIndex = Math.min(fromIndex + size, total);
-                List<AiCommentReply> pageContent = fromIndex < total
-                    ? filtered.subList(fromIndex, toIndex) : List.of();
-
                 Map<String, Object> result = new HashMap<>();
-                result.put("items", pageContent);
-                result.put("total", total);
+                result.put("items", filtered);
+                result.put("total", listResult.getTotal());
                 result.put("page", page);
                 result.put("size", size);
-                result.put("totalPages", (int) Math.ceil((double) total / size));
+                result.put("totalPages", (int) Math.ceil((double) listResult.getTotal() / size));
                 result.put("first", page == 1);
-                result.put("last", toIndex >= total);
+                result.put("last", page >= (int) Math.ceil((double) listResult.getTotal() / size));
                 return result;
             })
             .flatMap(result -> ServerResponse.ok().bodyValue(result));
@@ -362,22 +436,53 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         var name = request.pathVariable("name");
         return client.fetch(AiCommentReply.class, name)
             .flatMap(record -> {
-                // Find the corresponding Reply and set approved=true
-                return findReplyForRecord(record)
-                    .flatMap(reply -> {
-                        reply.getSpec().setApproved(true);
-                        reply.getSpec().setApprovedTime(Instant.now());
-                        return client.update(reply);
-                    })
-                    .then(Mono.defer(() -> {
-                        // Update AiCommentReply record
-                        return client.fetch(AiCommentReply.class, name)
+                String replyName = record.getSpec().getReplyName();
+                if (replyName == null || replyName.isBlank()) {
+                    // Draft mode: no Reply extension exists, create one with approved=true
+                    return commentReplyPublisher.publishReply(
+                            record.getSpec().getCommentId(),
+                            record.getSpec().getReply(),
+                            record.getSpec().getPostId(),
+                            record.getSpec().getReplyTo(),
+                            true,
+                            record.getSpec().getPersonaName()
+                        )
+                        .switchIfEmpty(Mono.defer(() -> {
+                            log.warn("[Endpoint] publishReply returned empty for draft approval of {}, AI reply may already exist", name);
+                            return Mono.error(new IllegalStateException("AI回复已存在，无法重复发布"));
+                        }))
+                        .flatMap(publishedReply -> {
+                            String newReplyName = publishedReply.getMetadata().getName();
+                            return client.fetch(AiCommentReply.class, name)
+                                .flatMap(latest -> {
+                                    latest.getSpec().setReplyName(newReplyName);
+                                    latest.getSpec().setPublished(true);
+                                    return client.update(latest);
+                                })
+                                .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                    .filter(e -> e instanceof OptimisticLockingFailureException));
+                        })
+                        .then(ServerResponse.ok().bodyValue(Map.of("message", "approved")));
+                } else {
+                    // Reply extension already exists, set approved=true
+                    return client.fetch(Reply.class, replyName)
+                        .flatMap(reply -> {
+                            reply.getSpec().setApproved(true);
+                            reply.getSpec().setApprovedTime(Instant.now());
+                            return client.update(reply);
+                        })
+                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                            .filter(e -> e instanceof OptimisticLockingFailureException))
+                        .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
                             .flatMap(latest -> {
                                 latest.getSpec().setPublished(true);
                                 return client.update(latest);
-                            });
-                    }))
-                    .then(ServerResponse.ok().bodyValue(Map.of("message", "approved")));
+                            })
+                            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                .filter(e -> e instanceof OptimisticLockingFailureException))
+                        ))
+                        .then(ServerResponse.ok().bodyValue(Map.of("message", "approved")));
+                }
             })
             .switchIfEmpty(ServerResponse.notFound().build());
     }
@@ -386,18 +491,28 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         var name = request.pathVariable("name");
         return client.fetch(AiCommentReply.class, name)
             .flatMap(record -> {
-                // Delete the draft Reply if it exists
-                return findReplyForRecord(record)
-                    .flatMap(reply -> client.delete(reply))
-                    .then(Mono.defer(() -> {
-                        // Update AiCommentReply record status to REJECTED
-                        return client.fetch(AiCommentReply.class, name)
-                            .flatMap(latest -> {
-                                latest.getSpec().setStatus("REJECTED");
-                                latest.getSpec().setPublished(false);
-                                return client.update(latest);
-                            });
-                    }))
+                String replyName = record.getSpec().getReplyName();
+                Mono<Void> deleteReplyMono;
+                if (replyName != null && !replyName.isBlank()) {
+                    // Reply extension exists, delete it
+                    deleteReplyMono = client.fetch(Reply.class, replyName)
+                        .flatMap(reply -> client.delete(reply))
+                        .then();
+                } else {
+                    // No Reply extension in draft mode, nothing to delete
+                    deleteReplyMono = Mono.empty();
+                }
+                return deleteReplyMono
+                    .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
+                        .flatMap(latest -> {
+                            latest.getSpec().setStatus("REJECTED");
+                            latest.getSpec().setPublished(false);
+                            latest.getSpec().setReplyName(null);
+                            return client.update(latest);
+                        })
+                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                            .filter(e -> e instanceof OptimisticLockingFailureException))
+                    ))
                     .then(ServerResponse.ok().bodyValue(Map.of("message", "rejected")));
             })
             .switchIfEmpty(ServerResponse.notFound().build());
@@ -418,19 +533,51 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                 return Flux.fromIterable(names)
                     .flatMap(name ->
                         client.fetch(AiCommentReply.class, name)
-                            .flatMap(record -> findReplyForRecord(record)
-                                .flatMap(reply -> {
-                                    reply.getSpec().setApproved(true);
-                                    reply.getSpec().setApprovedTime(Instant.now());
-                                    return client.update(reply);
-                                })
-                                .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
-                                    .flatMap(latest -> {
-                                        latest.getSpec().setPublished(true);
-                                        return client.update(latest);
-                                    })))
-                                .thenReturn(true)
-                            )
+                            .flatMap(record -> {
+                                String replyName = record.getSpec().getReplyName();
+                                if (replyName == null || replyName.isBlank()) {
+                                    // Draft mode: no Reply extension exists, create one with approved=true
+                                    return commentReplyPublisher.publishReply(
+                                            record.getSpec().getCommentId(),
+                                            record.getSpec().getReply(),
+                                            record.getSpec().getPostId(),
+                                            record.getSpec().getReplyTo(),
+                                            true,
+                                            record.getSpec().getPersonaName()
+                                        )
+                                        .switchIfEmpty(Mono.error(new IllegalStateException("AI回复已存在，无法重复发布")))
+                                        .flatMap(publishedReply -> {
+                                            String newReplyName = publishedReply.getMetadata().getName();
+                                            return client.fetch(AiCommentReply.class, name)
+                                                .flatMap(latest -> {
+                                                    latest.getSpec().setReplyName(newReplyName);
+                                                    latest.getSpec().setPublished(true);
+                                                    return client.update(latest);
+                                                })
+                                                .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                                    .filter(e -> e instanceof OptimisticLockingFailureException));
+                                        });
+                                } else {
+                                    // Reply extension already exists, set approved=true
+                                    return client.fetch(Reply.class, replyName)
+                                        .flatMap(reply -> {
+                                            reply.getSpec().setApproved(true);
+                                            reply.getSpec().setApprovedTime(Instant.now());
+                                            return client.update(reply);
+                                        })
+                                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                            .filter(e -> e instanceof OptimisticLockingFailureException))
+                                        .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
+                                            .flatMap(latest -> {
+                                                latest.getSpec().setPublished(true);
+                                                return client.update(latest);
+                                            })
+                                            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                                .filter(e -> e instanceof OptimisticLockingFailureException))
+                                        ));
+                                }
+                            })
+                            .thenReturn(true)
                             .onErrorResume(e -> {
                                 log.warn("Batch approve failed for {}: {}", name, e.getMessage());
                                 return Mono.just(false);
@@ -462,16 +609,29 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                 return Flux.fromIterable(names)
                     .flatMap(name ->
                         client.fetch(AiCommentReply.class, name)
-                            .flatMap(record -> findReplyForRecord(record)
-                                .flatMap(reply -> client.delete(reply))
-                                .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
-                                    .flatMap(latest -> {
-                                        latest.getSpec().setStatus("REJECTED");
-                                        latest.getSpec().setPublished(false);
-                                        return client.update(latest);
-                                    })))
-                                .thenReturn(true)
-                            )
+                            .flatMap(record -> {
+                                String replyName = record.getSpec().getReplyName();
+                                Mono<Void> deleteReplyMono;
+                                if (replyName != null && !replyName.isBlank()) {
+                                    deleteReplyMono = client.fetch(Reply.class, replyName)
+                                        .flatMap(reply -> client.delete(reply))
+                                        .then();
+                                } else {
+                                    deleteReplyMono = Mono.empty();
+                                }
+                                return deleteReplyMono
+                                    .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
+                                        .flatMap(latest -> {
+                                            latest.getSpec().setStatus("REJECTED");
+                                            latest.getSpec().setPublished(false);
+                                            latest.getSpec().setReplyName(null);
+                                            return client.update(latest);
+                                        })
+                                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                            .filter(e -> e instanceof OptimisticLockingFailureException))
+                                    ))
+                                    .thenReturn(true);
+                            })
                             .onErrorResume(e -> {
                                 log.warn("Batch reject failed for {}: {}", name, e.getMessage());
                                 return Mono.just(false);
@@ -600,8 +760,12 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     }
 
     private Mono<Reply> findReplyForRecord(AiCommentReply record) {
-        // Find the Reply that belongs to the same comment and was created by AI
-        // If the record has a quoteReply, match by that too for precision
+        // First try using replyName if available
+        String replyName = record.getSpec().getReplyName();
+        if (replyName != null && !replyName.isBlank()) {
+            return client.fetch(Reply.class, replyName);
+        }
+        // Fallback: find the Reply by commentName + owner annotations
         return client.list(Reply.class,
                 reply -> {
                     if (!record.getSpec().getCommentId().equals(reply.getSpec().getCommentName())) {
@@ -634,7 +798,8 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
 
     public record CommenterInfo(
         String displayName,
-        String email
+        String email,
+        String avatarUrl
     ) {}
 
     private Mono<ServerResponse> listCommenters(ServerRequest request) {
@@ -647,16 +812,37 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     var owner = comment.getSpec() != null ? comment.getSpec().getOwner() : null;
                     if (owner == null) continue;
                     String displayName = owner.getDisplayName() != null ? owner.getDisplayName() : "";
-                    String email = "EMAIL".equals(owner.getKind()) && owner.getName() != null
+                    String email = Comment.CommentOwner.KIND_EMAIL.equals(owner.getKind()) && owner.getName() != null
                         ? owner.getName() : "";
                     String key = displayName.toLowerCase() + "|" + email.toLowerCase();
                     if (seen.add(key)) {
-                        result.add(new CommenterInfo(displayName, email));
+                        // 优先使用 owner 注解中的头像，否则用邮箱生成 Gravatar
+                        String avatarUrl = "";
+                        if (owner.getAnnotations() != null && owner.getAnnotations().get(Comment.CommentOwner.AVATAR_ANNO) != null) {
+                            avatarUrl = owner.getAnnotations().get(Comment.CommentOwner.AVATAR_ANNO);
+                        } else if (!email.isBlank()) {
+                            avatarUrl = generateGravatarUrl(email);
+                        }
+                        result.add(new CommenterInfo(displayName, email, avatarUrl));
                     }
                 }
                 return result;
             })
             .flatMap(commenters -> ServerResponse.ok().bodyValue(commenters));
+    }
+
+    private String generateGravatarUrl(String email) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            var hashBytes = digest.digest(email.trim().toLowerCase().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            var hexString = new StringBuilder();
+            for (byte b : hashBytes) {
+                hexString.append(String.format("%02x", b));
+            }
+            return "https://cn.cravatar.com/avatar/" + hexString;
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private Mono<ServerResponse> triggerCleanup(ServerRequest request) {
@@ -703,6 +889,13 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     private Mono<ServerResponse> listPersonas(ServerRequest request) {
         return client.listAll(AiPersona.class, ListOptions.builder().build(), Sort.unsorted())
             .collectList()
+            .map(personas -> personas.stream()
+                .sorted(Comparator.comparing(
+                    (AiPersona p) -> p.getSpec() != null ? p.getSpec().getPriority() : null,
+                    Comparator.nullsLast(Comparator.naturalOrder())
+                ))
+                .toList()
+            )
             .flatMap(personas -> ServerResponse.ok().bodyValue(personas));
     }
 
@@ -742,6 +935,8 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     existing.setSpec(updatedPersona.getSpec());
                     return client.update(existing);
                 })
+                .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                    .filter(e -> e instanceof OptimisticLockingFailureException))
                 .flatMap(saved -> ServerResponse.ok().bodyValue(saved))
                 .onErrorResume(e -> {
                     log.warn("Failed to update persona {}: {}", name, e.getMessage());
@@ -764,5 +959,160 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     .then(ServerResponse.ok().bodyValue(Map.of("message", "deleted")));
             })
             .switchIfEmpty(ServerResponse.notFound().build());
+    }
+
+    private Mono<ServerResponse> exportConfig(ServerRequest request) {
+        var result = new java.util.LinkedHashMap<String, Object>();
+        // 导出 ConfigMap
+        return client.fetch(run.halo.app.extension.ConfigMap.class, CONFIG_MAP_NAME)
+            .map(configMap -> {
+                result.put("configMap", configMap.getData());
+                return result;
+            })
+            .defaultIfEmpty(result)
+            .flatMap(r -> {
+                // 导出所有 AiPersona
+                return client.list(AiPersona.class, null, null)
+                    .collectList()
+                    .map(personas -> {
+                        r.put("personas", personas);
+                        return r;
+                    });
+            })
+            .flatMap(r -> ServerResponse.ok()
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .bodyValue(r));
+    }
+
+    private Mono<ServerResponse> importConfig(ServerRequest request) {
+        return request.bodyToMono(java.util.Map.class)
+            .flatMap(body -> {
+                if (body == null || !body.containsKey("configMap") && !body.containsKey("personas")) {
+                    return ServerResponse.badRequest()
+                        .bodyValue(java.util.Map.of("error", "无效的配置格式"));
+                }
+                var results = new java.util.ArrayList<String>();
+                Mono<Void> importMono = Mono.empty();
+
+                // 导入 ConfigMap
+                if (body.containsKey("configMap")) {
+                    @SuppressWarnings("unchecked")
+                    var configMapData = (java.util.Map<String, String>) body.get("configMap");
+                    importMono = importMono.then(
+                        client.fetch(run.halo.app.extension.ConfigMap.class, CONFIG_MAP_NAME)
+                            .flatMap(existing -> {
+                                existing.setData(configMapData);
+                                return client.update(existing)
+                                    .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                        .filter(e -> e instanceof OptimisticLockingFailureException))
+                                    .doOnSuccess(v -> results.add("ConfigMap 已更新"))
+                                    .then();
+                            })
+                            .switchIfEmpty(Mono.defer(() -> {
+                                run.halo.app.extension.ConfigMap cm = new run.halo.app.extension.ConfigMap();
+                                cm.setMetadata(new run.halo.app.extension.Metadata());
+                                cm.getMetadata().setName(CONFIG_MAP_NAME);
+                                cm.setData(configMapData);
+                                return client.create(cm)
+                                    .doOnSuccess(v -> results.add("ConfigMap 已创建"))
+                                    .then();
+                            }))
+                    );
+                }
+
+                // 导入 AiPersona
+                if (body.containsKey("personas")) {
+                    @SuppressWarnings("unchecked")
+                    var personasList = (java.util.List<java.util.Map<String, Object>>) body.get("personas");
+                    for (var personaData : personasList) {
+                        importMono = importMono.then(Mono.defer(() -> {
+                            try {
+                                var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                                var personaJson = objectMapper.writeValueAsString(personaData);
+                                var persona = objectMapper.readValue(personaJson, AiPersona.class);
+                                var personaName = persona.getMetadata().getName();
+                                return client.fetch(AiPersona.class, personaName)
+                                    .flatMap(existing -> {
+                                        persona.getMetadata().setVersion(existing.getMetadata().getVersion());
+                                        return client.update(persona)
+                                            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                                .filter(e -> e instanceof OptimisticLockingFailureException))
+                                            .doOnSuccess(v -> results.add("角色 '" + persona.getSpec().getDisplayName() + "' 已更新"))
+                                            .then();
+                                    })
+                                    .switchIfEmpty(client.create(persona)
+                                        .doOnSuccess(v -> results.add("角色 '" + persona.getSpec().getDisplayName() + "' 已创建"))
+                                        .then());
+                            } catch (Exception e) {
+                                results.add("导入角色失败: " + e.getMessage());
+                                return Mono.<Void>empty();
+                            }
+                        }));
+                    }
+                }
+
+                return importMono.then(
+                    ServerResponse.ok().bodyValue(java.util.Map.of("results", results))
+                );
+            })
+            .onErrorResume(e -> ServerResponse.badRequest()
+                .bodyValue(java.util.Map.of("error", "导入失败: " + e.getMessage())));
+    }
+
+    private Mono<ServerResponse> updateReplyContent(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return request.bodyToMono(String.class)
+            .flatMap(body -> {
+                String newReply;
+                try {
+                    JsonNode node = objectMapper.readTree(body);
+                    JsonNode replyNode = node.get("reply");
+                    if (replyNode == null || replyNode.asText().isBlank()) {
+                        return ServerResponse.badRequest()
+                            .bodyValue(Map.of("message", "reply 字段不能为空"));
+                    }
+                    newReply = replyNode.asText();
+                } catch (Exception e) {
+                    return ServerResponse.badRequest()
+                        .bodyValue(Map.of("message", "请求体格式错误"));
+                }
+
+                return client.fetch(AiCommentReply.class, name)
+                    .flatMap(record -> {
+                        // Only allow when published is false (draft mode)
+                        if (Boolean.TRUE.equals(record.getSpec().getPublished())) {
+                            return ServerResponse.badRequest()
+                                .bodyValue(Map.of("message", "已发布的回复不可编辑"));
+                        }
+
+                        // Update AiCommentReply.spec.reply
+                        return client.fetch(AiCommentReply.class, name)
+                            .flatMap(latest -> {
+                                latest.getSpec().setReply(newReply);
+                                return client.update(latest);
+                            })
+                            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                .filter(e -> e instanceof OptimisticLockingFailureException))
+                            .flatMap(updatedRecord -> {
+                                String replyName = updatedRecord.getSpec().getReplyName();
+                                if (replyName != null && !replyName.isBlank()) {
+                                    // Reply extension exists, update its content too
+                                    return client.fetch(Reply.class, replyName)
+                                        .flatMap(reply -> {
+                                            reply.getSpec().setRaw(newReply);
+                                            reply.getSpec().setContent(newReply);
+                                            return client.update(reply);
+                                        })
+                                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                            .filter(e -> e instanceof OptimisticLockingFailureException))
+                                        .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)));
+                                }
+                                // Draft mode: no Reply extension, only update AiCommentReply
+                                return Mono.just(updatedRecord);
+                            })
+                            .flatMap(finalRecord -> ServerResponse.ok().bodyValue(finalRecord));
+                    })
+                    .switchIfEmpty(ServerResponse.notFound().build());
+            });
     }
 }

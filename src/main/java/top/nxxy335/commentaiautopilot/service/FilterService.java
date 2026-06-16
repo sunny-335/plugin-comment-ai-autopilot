@@ -135,7 +135,7 @@ public class FilterService {
     private String getCommenterEmail(Comment comment) {
         if (comment.getSpec() == null || comment.getSpec().getOwner() == null) return "";
         var owner = comment.getSpec().getOwner();
-        if ("EMAIL".equals(owner.getKind())) {
+        if (Comment.CommentOwner.KIND_EMAIL.equals(owner.getKind())) {
             var name = owner.getName();
             return name != null ? name : "";
         }

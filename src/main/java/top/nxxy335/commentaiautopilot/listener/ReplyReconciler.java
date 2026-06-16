@@ -4,9 +4,11 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.scheduler.Schedulers;
+import run.halo.app.core.extension.content.Category;
 import run.halo.app.core.extension.content.Comment;
 import run.halo.app.core.extension.content.Post;
 import run.halo.app.core.extension.content.Reply;
+import run.halo.app.core.extension.content.Tag;
 import run.halo.app.extension.ExtensionClient;
 import run.halo.app.extension.controller.Controller;
 import run.halo.app.extension.controller.ControllerBuilder;
@@ -159,11 +161,43 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
                 String postName = subjectRef.getName();
                 return client.fetch(Post.class, postName)
                     .map(post -> {
+                        // 1. 文章注解优先
                         var annotations = post.getMetadata().getAnnotations();
                         if (annotations != null) {
                             String persona = annotations.get(AI_PERSONA_ANNOTATION);
                             if (persona != null && !persona.isBlank()) {
                                 return persona;
+                            }
+                        }
+                        // 2. 分类注解
+                        var spec = post.getSpec();
+                        if (spec != null && spec.getCategories() != null) {
+                            for (String categoryName : spec.getCategories()) {
+                                var cat = client.fetch(Category.class, categoryName).orElse(null);
+                                if (cat != null) {
+                                    var catAnnotations = cat.getMetadata().getAnnotations();
+                                    if (catAnnotations != null) {
+                                        String catPersona = catAnnotations.get(AI_PERSONA_ANNOTATION);
+                                        if (catPersona != null && !catPersona.isBlank()) {
+                                            return catPersona;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // 3. 标签注解
+                        if (spec != null && spec.getTags() != null) {
+                            for (String tagName : spec.getTags()) {
+                                var tag = client.fetch(Tag.class, tagName).orElse(null);
+                                if (tag != null) {
+                                    var tagAnnotations = tag.getMetadata().getAnnotations();
+                                    if (tagAnnotations != null) {
+                                        String tagPersona = tagAnnotations.get(AI_PERSONA_ANNOTATION);
+                                        if (tagPersona != null && !tagPersona.isBlank()) {
+                                            return tagPersona;
+                                        }
+                                    }
+                                }
                             }
                         }
                         return null;

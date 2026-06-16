@@ -37,3 +37,33 @@ spec:
       label: AI角色
       help: 选择该页面使用的AI回复角色名称，留空使用默认角色
       value: ""
+---
+apiVersion: v1alpha1
+kind: AnnotationSetting
+metadata:
+  name: comment-ai-autopilot-category-annotation-setting
+spec:
+  targetRef:
+    group: content.halo.run
+    kind: Category
+  formSchema:
+    - $formkit: text
+      name: comment-ai-autopilot.nxxy335.top/ai-persona
+      label: AI角色
+      help: 选择该分类下文章使用的AI回复角色名称，留空使用默认角色
+      value: ""
+---
+apiVersion: v1alpha1
+kind: AnnotationSetting
+metadata:
+  name: comment-ai-autopilot-tag-annotation-setting
+spec:
+  targetRef:
+    group: content.halo.run
+    kind: Tag
+  formSchema:
+    - $formkit: text
+      name: comment-ai-autopilot.nxxy335.top/ai-persona
+      label: AI角色
+      help: 选择该标签下文章使用的AI回复角色名称，留空使用默认角色
+      value: ""

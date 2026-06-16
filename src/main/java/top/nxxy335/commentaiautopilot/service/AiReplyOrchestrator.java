@@ -36,7 +36,10 @@ public class AiReplyOrchestrator {
 
     // In-memory dedup: tracks which comment/reply is currently being processed
     // Prevents duplicate replies when Reconciler fires multiple times
-    private final ConcurrentHashMap<String, Boolean> processingLocks = new ConcurrentHashMap<>();
+    // Value is the timestamp when the lock was acquired, used for leak detection
+    private final ConcurrentHashMap<String, Long> processingLocks = new ConcurrentHashMap<>();
+
+    private static final long LOCK_EXPIRY_MS = 2 * 60 * 1000L; // 2 minutes
 
     public AiReplyOrchestrator(ContextExtractor contextExtractor,
                                PromptBuilder promptBuilder,
@@ -71,8 +74,11 @@ public class AiReplyOrchestrator {
                                       String personaName) {
         String lockKey = isAiConversation ? commentName + ":conv:" + replyName : commentName + ":top";
 
+        // Clean up stale locks before acquiring new one
+        cleanupStaleLocks();
+
         // In-memory dedup: if already processing, skip immediately
-        if (processingLocks.putIfAbsent(lockKey, Boolean.TRUE) != null) {
+        if (processingLocks.putIfAbsent(lockKey, System.currentTimeMillis()) != null) {
             log.info("[Orchestrator] Already processing: {}, skipping duplicate", lockKey);
             return Mono.empty();
         }
@@ -220,7 +226,7 @@ public class AiReplyOrchestrator {
                             log.warn("[Orchestrator] Content safety review FAILED for: {}, not publishing",
                                 context.commentId());
                             // Save the failed reply content, then retry
-                            return updateRecord(replyRecord, aiReply, 0, "FAIL", false)
+                            return updateRecord(replyRecord, aiReply, 0, "FAIL", false, null)
                                 .then(retryOrFail(replyRecord, context, modelName, personaName, "Content safety review failed"));
                         }
                         return publishReply(context, aiReply, replyRecord, reviewResult.score(), personaName);
@@ -263,7 +269,7 @@ public class AiReplyOrchestrator {
             } else {
                 log.warn("[Orchestrator] Max retry count ({}) exceeded for: {}, marking as FAIL. Reason: {}",
                     maxRetry, context.commentId(), reason);
-                return updateRecord(replyRecord, "", 0, "FAIL", false).then();
+                return updateRecord(replyRecord, "", 0, "FAIL", false, null).then();
             }
         });
     }
@@ -305,19 +311,36 @@ public class AiReplyOrchestrator {
     }
 
     /**
-     * Publish the reply and update the record to PASS + published=true.
+     * Publish the reply and update the record.
+     * When autoPublish=true: create Reply extension and save replyName.
+     * When autoPublish=false (draft mode): do NOT create Reply extension, only save AI reply content.
      */
     private Mono<Void> publishReply(ContextExtractor.CommentContext context, String aiReply,
                                      AiCommentReply replyRecord, int score, String personaName) {
         return isAutoPublishEnabled()
             .flatMap(autoPublish -> {
-                return commentReplyPublisher.publishReply(
-                        context.commentId(), aiReply, context.postId(), context.replyTo(), autoPublish, personaName)
-                    .flatMap(publishedReply -> {
-                        log.info("[Orchestrator] Reply {} for: {}", autoPublish ? "published" : "saved as draft", context.commentId());
-                        return updateRecord(replyRecord, aiReply, score, "PASS", autoPublish);
-                    })
-                    .flatMap(updated -> Mono.empty());
+                if (autoPublish) {
+                    // Auto publish: create Reply extension and save replyName
+                    return commentReplyPublisher.publishReply(
+                            context.commentId(), aiReply, context.postId(), context.replyTo(), true, personaName)
+                        .flatMap(publishedReply -> {
+                            String replyName = publishedReply.getMetadata().getName();
+                            log.info("[Orchestrator] Reply published for: {}, replyName={}", context.commentId(), replyName);
+                            return updateRecord(replyRecord, aiReply, score, "PASS", true, replyName);
+                        })
+                        .switchIfEmpty(Mono.defer(() -> {
+                            // publishReply returned empty (dedup: AI reply already exists)
+                            // Fallback to draft mode to avoid leaving record in PENDING state
+                            log.warn("[Orchestrator] publishReply returned empty for {}, falling back to draft mode", context.commentId());
+                            return updateRecord(replyRecord, aiReply, score, "PASS", false, null);
+                        }))
+                        .flatMap(updated -> Mono.empty());
+                } else {
+                    // Draft mode: do NOT create Reply extension, only save AI reply content
+                    log.info("[Orchestrator] Draft mode: saving reply content without creating Reply extension for: {}", context.commentId());
+                    return updateRecord(replyRecord, aiReply, score, "PASS", false, null)
+                        .flatMap(updated -> Mono.empty());
+                }
             })
             .then();
     }
@@ -515,15 +538,17 @@ public class AiReplyOrchestrator {
     }
 
     private Mono<AiCommentReply> updateRecord(AiCommentReply record, String reply,
-                                               int score, String status, boolean published) {
-        log.debug("[Orchestrator] Updating record {}: status={}, score={}, published={}",
-            record.getMetadata().getName(), status, score, published);
+                                               int score, String status, boolean published,
+                                               String replyName) {
+        log.debug("[Orchestrator] Updating record {}: status={}, score={}, published={}, replyName={}",
+            record.getMetadata().getName(), status, score, published, replyName);
         return client.fetch(AiCommentReply.class, record.getMetadata().getName())
             .flatMap(latest -> {
                 latest.getSpec().setReply(reply);
                 latest.getSpec().setScore(score);
                 latest.getSpec().setStatus(status);
                 latest.getSpec().setPublished(published);
+                latest.getSpec().setReplyName(replyName);
                 return client.update(latest);
             })
             .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
@@ -531,7 +556,24 @@ public class AiReplyOrchestrator {
                 .doBeforeRetry(signal -> log.debug("[Orchestrator] Retrying update for {} due to optimistic lock",
                     record.getMetadata().getName()))
             )
-            .doOnSuccess(updated -> log.debug("[Orchestrator] Record {} updated: status={}, score={}, published={}",
-                record.getMetadata().getName(), status, score, published));
+            .doOnSuccess(updated -> log.debug("[Orchestrator] Record {} updated: status={}, score={}, published={}, replyName={}",
+                record.getMetadata().getName(), status, score, published, replyName));
+    }
+
+    /**
+     * Clean up stale locks that have been held longer than LOCK_EXPIRY_MS.
+     * This prevents memory leaks in case of unexpected errors or cancellations
+     * that bypass the doFinally cleanup.
+     */
+    private void cleanupStaleLocks() {
+        long now = System.currentTimeMillis();
+        processingLocks.entrySet().removeIf(entry -> {
+            long age = now - entry.getValue();
+            if (age > LOCK_EXPIRY_MS) {
+                log.warn("[Orchestrator] Removing stale lock: {} (held for {}ms)", entry.getKey(), age);
+                return true;
+            }
+            return false;
+        });
     }
 }

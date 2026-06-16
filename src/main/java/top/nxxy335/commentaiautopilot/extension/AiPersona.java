@@ -37,5 +37,8 @@ public class AiPersona extends AbstractExtension {
         @Schema(description = "是否为默认角色")
         @JsonProperty("isDefault")
         private Boolean isDefault;
+
+        @Schema(description = "排序优先级，数值越小越靠前")
+        private Integer priority;
     }
 }

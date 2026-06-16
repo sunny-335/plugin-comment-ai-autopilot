@@ -118,6 +118,7 @@ public class CommentReplyPublisher {
 
             Map<String, String> ownerAnnotations = new HashMap<>();
             ownerAnnotations.put("comment-ai-autopilot.nxxy335.top/is-ai", "true");
+            // 使用Gravatar邮箱头像
             if (email != null && !email.isBlank()) {
                 String gravatarUrl = generateGravatarUrl(email);
                 ownerAnnotations.put(Comment.CommentOwner.AVATAR_ANNO, gravatarUrl);
@@ -125,9 +126,16 @@ public class CommentReplyPublisher {
             owner.setAnnotations(ownerAnnotations);
             spec.setOwner(owner);
 
+            log.info("[Publisher] Creating reply for comment: {}, owner: kind={}, name={}, displayName={}, annotations={}",
+                parentCommentName, owner.getKind(), owner.getName(), owner.getDisplayName(), ownerAnnotations);
+
             return client.create(reply)
-                .doOnSuccess(created -> log.info("[Publisher] AI Persona '{}' reply published for comment: {}, quoteReply: {}",
-                    displayName, parentCommentName, quoteReplyName))
+                .doOnSuccess(created -> {
+                    var createdOwner = created.getSpec().getOwner();
+                    log.info("[Publisher] AI Persona '{}' reply published for comment: {}, quoteReply: {}, owner annotations after create: {}",
+                        displayName, parentCommentName, quoteReplyName,
+                        createdOwner != null ? createdOwner.getAnnotations() : "null");
+                })
                 .doOnError(e -> log.error("[Publisher] Failed to publish AI reply: {}", e.getMessage()));
         });
     }
@@ -142,10 +150,14 @@ public class CommentReplyPublisher {
     private Mono<ResolvedPersona> resolvePersona(String personaName) {
         if (personaName != null && !personaName.isBlank()) {
             return client.fetch(AiPersona.class, personaName)
-                .map(p -> new ResolvedPersona(
-                    p.getSpec().getDisplayName(),
-                    p.getSpec().getEmail()
-                ))
+                .map(p -> {
+                    log.info("[Publisher] Resolved persona by name: {}, email={}",
+                        personaName, p.getSpec().getEmail());
+                    return new ResolvedPersona(
+                        p.getSpec().getDisplayName(),
+                        p.getSpec().getEmail()
+                    );
+                })
                 .defaultIfEmpty(new ResolvedPersona("小回", ""));
         }
         // Find default persona
@@ -153,10 +165,14 @@ public class CommentReplyPublisher {
                 persona -> persona.getSpec() != null && Boolean.TRUE.equals(persona.getSpec().getIsDefault()),
                 null)
             .next()
-            .map(p -> new ResolvedPersona(
-                p.getSpec().getDisplayName(),
-                p.getSpec().getEmail()
-            ))
+            .map(p -> {
+                log.info("[Publisher] Resolved default persona: {}, email={}",
+                    p.getMetadata().getName(), p.getSpec().getEmail());
+                return new ResolvedPersona(
+                    p.getSpec().getDisplayName(),
+                    p.getSpec().getEmail()
+                );
+            })
             .defaultIfEmpty(new ResolvedPersona("小回", ""));
     }
 
