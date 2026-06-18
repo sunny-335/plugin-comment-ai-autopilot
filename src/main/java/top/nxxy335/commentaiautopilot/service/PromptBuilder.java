@@ -142,8 +142,10 @@ public class PromptBuilder {
                     return prompt;
                 }
                 String sentimentHint = switch (sentiment) {
+                    case "VERY_POSITIVE" -> "\n\n【情感提示】评论者情绪非常正面积极，请用热情洋溢的语气回复，表达真诚的感谢和共鸣。";
                     case "POSITIVE" -> "\n\n【情感提示】评论者情绪正面积极，请用热情友好的语气回复，可以表达感谢和共鸣。";
                     case "NEGATIVE" -> "\n\n【情感提示】评论者情绪偏负面，请用理性温和的语气回复，避免激化矛盾，展现理解和包容。";
+                    case "VERY_NEGATIVE" -> "\n\n【情感提示】评论者情绪非常负面，请用非常温和、理性的语气回复，避免任何可能激化矛盾的表达，展现充分的理解和耐心。";
                     default -> "";
                 };
                 return prompt + sentimentHint;

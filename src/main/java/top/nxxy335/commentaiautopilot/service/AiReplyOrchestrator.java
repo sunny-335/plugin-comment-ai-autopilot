@@ -525,6 +525,7 @@ public class AiReplyOrchestrator {
         record.getSpec().setCommentId(context.commentId());
         record.getSpec().setPostId(context.postId());
         record.getSpec().setPostSlug(context.postSlug());
+        record.getSpec().setPostKind(context.postKind());
         record.getSpec().setReply("");
         record.getSpec().setScore(0);
         record.getSpec().setStatus("PENDING");

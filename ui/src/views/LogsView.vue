@@ -11,27 +11,27 @@
 
     <!-- Batch Operation Toolbar -->
     <div v-if="selectedNames.size > 0" class="m-4 mb-0 flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5">
-      <span class="text-sm text-blue-700">已选择 {{ selectedNames.size }} 项</span>
+      <span class="text-sm text-blue-700 font-medium">已选择 {{ selectedNames.size }} 项</span>
       <button
-        class="text-xs px-3 py-1 rounded bg-green-600 text-white hover:bg-green-700 transition-colors"
+        class="batch-btn batch-btn--approve"
         @click="batchApprove"
       >
         批量通过
       </button>
       <button
-        class="text-xs px-3 py-1 rounded bg-orange-500 text-white hover:bg-orange-600 transition-colors"
+        class="batch-btn batch-btn--reject"
         @click="batchReject"
       >
         批量拒绝
       </button>
       <button
-        class="text-xs px-3 py-1 rounded bg-red-600 text-white hover:bg-red-700 transition-colors"
+        class="batch-btn batch-btn--delete"
         @click="batchDelete"
       >
         批量删除
       </button>
       <button
-        class="text-xs text-gray-500 hover:text-gray-700 ml-auto"
+        class="batch-btn batch-btn--cancel"
         @click="selectedNames.clear(); selectAll = false"
       >
         取消选择
@@ -42,7 +42,7 @@
     <div class="m-4 mb-0 flex items-center gap-3">
       <select
         v-model="filterStatus"
-        class="rounded-md border border-gray-300 pl-3 pr-8 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        class="filter-select"
       >
         <option value="">全部状态</option>
         <option value="PASS">通过</option>
@@ -52,23 +52,33 @@
       </select>
       <select
         v-model="filterSentiment"
-        class="rounded-md border border-gray-300 pl-3 pr-8 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        class="filter-select"
       >
         <option value="">全部情感</option>
+        <option value="VERY_POSITIVE">非常正面</option>
         <option value="POSITIVE">正面</option>
         <option value="NEUTRAL">中性</option>
         <option value="NEGATIVE">负面</option>
+        <option value="VERY_NEGATIVE">非常负面</option>
       </select>
-      <input
-        v-model="filterKeyword"
-        type="text"
-        placeholder="搜索回复内容..."
-        class="rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-      />
+      <div class="relative flex-1 max-w-xs">
+        <svg class="filter-search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        <input
+          v-model="filterKeyword"
+          type="text"
+          placeholder="搜索回复内容..."
+          class="filter-input"
+        />
+      </div>
       <button
-        class="text-xs text-gray-500 hover:text-gray-700"
+        class="filter-reset-btn"
         @click="resetFilters"
       >
+        <svg style="width:14px;height:14px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
         重置
       </button>
     </div>
@@ -112,26 +122,26 @@
                 <div class="flex items-center justify-between mb-3">
                   <div class="flex items-center gap-1.5 flex-wrap">
                     <span
-                      class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                      class="status-tag"
                       :class="getStatusClass(reply.spec.status)"
                     >
                       {{ getStatusLabel(reply.spec.status) }}
                     </span>
                     <span
-                      class="inline-flex items-center px-2 py-0.5 rounded text-xs"
-                      :class="reply.spec.published ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-400'"
+                      class="status-tag"
+                      :class="reply.spec.published ? 'status-tag--published' : 'status-tag--unpublished'"
                     >
                       {{ reply.spec.published ? '已发布' : '未发布' }}
                     </span>
                     <span
                       v-if="reply.spec.isAiConversation"
-                      class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-blue-50 text-blue-600"
+                      class="status-tag status-tag--conversation"
                     >
                       对话
                     </span>
                     <span
                       v-if="reply.spec.sentiment"
-                      class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                      class="status-tag"
                       :class="getSentimentClass(reply.spec.sentiment)"
                     >
                       {{ getSentimentLabel(reply.spec.sentiment) }}
@@ -151,14 +161,26 @@
           <!-- Card footer: meta info + actions -->
           <div class="px-4 py-2.5 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
             <div class="flex items-center gap-4 text-xs text-gray-400">
-              <span>
-                评分 <span :class="getScoreClass(reply.spec.score)" class="font-medium">{{ reply.spec.score }}</span>
-                <span class="text-gray-300 ml-0.5">{{ getScoreLabel(reply.spec.score) }}</span>
+              <span class="flex items-center gap-1.5">
+                评分 <span :class="getScoreClass(reply.spec.score)" class="font-semibold">{{ reply.spec.score }}</span>
+                <span class="score-label" :class="getScoreLabelClass(reply.spec.score)">{{ getScoreLabel(reply.spec.score) }}</span>
               </span>
-              <span v-if="reply.spec.postSlug" class="flex items-center gap-1">
+              <span v-if="reply.spec.postSlug && reply.spec.postKind === 'Post'" class="flex items-center gap-1">
                 文章
                 <a
                   :href="getPostUrl(reply.spec.postSlug)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="text-blue-500 hover:text-blue-700 hover:underline"
+                >{{ reply.spec.postSlug }}</a>
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+              </span>
+              <span v-else-if="reply.spec.postSlug && reply.spec.postKind === 'SinglePage'" class="flex items-center gap-1">
+                页面
+                <a
+                  :href="getPageUrl(reply.spec.postSlug)"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="text-blue-500 hover:text-blue-700 hover:underline"
@@ -318,6 +340,7 @@ interface AiCommentReplyItem {
     commentId: string
     postId: string
     postSlug: string
+    postKind: string
     reply: string
     score: number
     status: string
@@ -509,6 +532,14 @@ const getScoreClass = (score: number) => {
   return "text-red-600"
 }
 
+const getScoreLabelClass = (score: number) => {
+  if (score >= 85) return "score-label--excellent"
+  if (score >= 70) return "score-label--good"
+  if (score >= 50) return "score-label--average"
+  if (score > 0) return "score-label--poor"
+  return ""
+}
+
 const getScoreLabel = (score: number) => {
   if (score >= 85) return "优秀"
   if (score >= 70) return "良好"
@@ -520,15 +551,15 @@ const getScoreLabel = (score: number) => {
 const getStatusClass = (status: string) => {
   switch (status) {
     case "PASS":
-      return "bg-green-100 text-green-700"
+      return "status-tag--pass"
     case "FAIL":
-      return "bg-red-100 text-red-700"
+      return "status-tag--fail"
     case "PENDING":
-      return "bg-gray-100 text-gray-700"
+      return "status-tag--pending"
     case "REJECTED":
-      return "bg-red-100 text-red-700"
+      return "status-tag--rejected"
     default:
-      return "bg-gray-100 text-gray-700"
+      return "status-tag--pending"
   }
 }
 
@@ -549,23 +580,31 @@ const getStatusLabel = (status: string) => {
 
 const getSentimentClass = (sentiment: string) => {
   switch (sentiment) {
+    case "VERY_POSITIVE":
+      return "status-tag--very-positive"
     case "POSITIVE":
-      return "bg-green-50 text-green-600"
+      return "status-tag--positive"
     case "NEGATIVE":
-      return "bg-red-50 text-red-600"
+      return "status-tag--negative"
+    case "VERY_NEGATIVE":
+      return "status-tag--very-negative"
     case "NEUTRAL":
-      return "bg-gray-100 text-gray-600"
+      return "status-tag--neutral-sentiment"
     default:
-      return "bg-gray-100 text-gray-600"
+      return "status-tag--neutral-sentiment"
   }
 }
 
 const getSentimentLabel = (sentiment: string) => {
   switch (sentiment) {
+    case "VERY_POSITIVE":
+      return "非常正面"
     case "POSITIVE":
       return "正面"
     case "NEGATIVE":
       return "负面"
+    case "VERY_NEGATIVE":
+      return "非常负面"
     case "NEUTRAL":
       return "中性"
     default:
@@ -580,6 +619,10 @@ const formatDate = (timestamp: string) => {
 
 const getPostUrl = (slug: string) => {
   return `${window.location.origin}/archives/${slug}`
+}
+
+const getPageUrl = (slug: string) => {
+  return `${window.location.origin}/pages/${slug}`
 }
 
 /**
@@ -648,5 +691,207 @@ onMounted(fetchReplies)
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* ===== Batch Operation Buttons ===== */
+.batch-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.5;
+}
+.batch-btn--approve {
+  background-color: #16a34a;
+  color: #fff;
+}
+.batch-btn--approve:hover {
+  background-color: #15803d;
+}
+.batch-btn--reject {
+  background-color: #f97316;
+  color: #fff;
+}
+.batch-btn--reject:hover {
+  background-color: #ea580c;
+}
+.batch-btn--delete {
+  background-color: #dc2626;
+  color: #fff;
+}
+.batch-btn--delete:hover {
+  background-color: #b91c1c;
+}
+.batch-btn--cancel {
+  background: none;
+  color: #6b7280;
+  margin-left: auto;
+}
+.batch-btn--cancel:hover {
+  color: #374151;
+  background: #f3f4f6;
+}
+
+/* ===== Filter Bar ===== */
+.filter-select {
+  padding: 6px 32px 6px 12px;
+  font-size: 13px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  color: #374151;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%239ca3af'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 16px;
+  transition: all 0.15s ease;
+}
+.filter-select:focus {
+  border-color: #3b82f6;
+  background-color: #fff;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+.filter-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  color: #9ca3af;
+  pointer-events: none;
+}
+.filter-input {
+  width: 100%;
+  padding: 6px 12px 6px 34px;
+  font-size: 13px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+  color: #374151;
+  outline: none;
+  transition: all 0.15s ease;
+}
+.filter-input:focus {
+  border-color: #3b82f6;
+  background-color: #fff;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+.filter-input::placeholder {
+  color: #9ca3af;
+}
+.filter-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: #6b7280;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.filter-reset-btn:hover {
+  color: #374151;
+  background: #e5e7eb;
+}
+
+/* ===== Status Tags ===== */
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.status-tag--pass {
+  background: #dcfce7;
+  color: #166534;
+}
+.status-tag--fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.status-tag--pending {
+  background: #f3f4f6;
+  color: #374151;
+}
+.status-tag--rejected {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.status-tag--published {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.status-tag--unpublished {
+  background: #f3f4f6;
+  color: #9ca3af;
+}
+.status-tag--conversation {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+/* Sentiment tags */
+.status-tag--very-positive {
+  background: #dcfce7;
+  color: #166534;
+}
+.status-tag--positive {
+  background: #bbf7d0;
+  color: #15803d;
+}
+.status-tag--neutral-sentiment {
+  background: #f3f4f6;
+  color: #4b5563;
+}
+.status-tag--negative {
+  background: #fecaca;
+  color: #b91c1c;
+}
+.status-tag--very-negative {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* ===== Score Label ===== */
+.score-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  margin-left: 4px;
+}
+.score-label--excellent {
+  background: #dcfce7;
+  color: #166534;
+}
+.score-label--good {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.score-label--average {
+  background: #fef3c7;
+  color: #92400e;
+}
+.score-label--poor {
+  background: #fee2e2;
+  color: #991b1b;
 }
 </style>

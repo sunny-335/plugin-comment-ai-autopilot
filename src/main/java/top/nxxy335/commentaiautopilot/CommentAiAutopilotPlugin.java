@@ -47,6 +47,8 @@ public class CommentAiAutopilotPlugin extends BasePlugin {
                 .indexFunc(ext -> ext.getSpec().getSentiment()));
             indexSpecs.add(IndexSpecs.<AiCommentReply, String>single("spec.published", String.class)
                 .indexFunc(ext -> String.valueOf(ext.getSpec().getPublished())));
+            indexSpecs.add(IndexSpecs.<AiCommentReply, String>single("spec.postKind", String.class)
+                .indexFunc(ext -> ext.getSpec().getPostKind()));
         });
         schemeManager.register(AiPersona.class);
 

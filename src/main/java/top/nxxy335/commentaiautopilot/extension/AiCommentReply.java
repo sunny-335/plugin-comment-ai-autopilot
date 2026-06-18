@@ -33,6 +33,9 @@ public class AiCommentReply extends AbstractExtension {
         @Schema(description = "关联文章Slug，用于生成文章链接")
         private String postSlug;
 
+        @Schema(description = "关联内容类型: Post/SinglePage")
+        private String postKind;
+
         @Schema(description = "AI回复内容")
         private String reply;
 

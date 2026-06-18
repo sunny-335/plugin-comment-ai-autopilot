@@ -1,5 +1,24 @@
 # 更新日志
 
+## v1.0.0-b26cea
+
+> 2026-06-18
+
+### 改进
+
+- **优化情感分析系统**：从 3 级分类（正面/中性/负面）升级为 5 级分类（非常正面/正面/中性/负面/非常负面），情感判断更精细
+- **优化日志页面 UI**：批量操作按钮重写样式，确保底色和白色文字清晰可见；搜索框添加搜索图标；重置按钮添加图标和底色
+- **优化评分显示**：评分数字与等级标签之间添加间距，等级标签增加底色背景（优秀/良好/一般/较差）
+- **优化状态标签**：通过状态、发布状态、情感标签统一使用带底色的标签样式
+- **支持页面链接显示**：日志中新增独立页面（SinglePage）链接显示，之前仅支持文章链接
+- **ObjectMapper 统一注入**：FilterService 和 PromptBuilder 中的 `new ObjectMapper()` 改为 Spring 构造函数注入
+- **服务端过滤优化**：日志列表查询改用 `Queries.equal()` 服务端过滤 status/sentiment，减少内存过滤开销
+- **新增索引**：为 AiCommentReply 扩展添加 `spec.sentiment`、`spec.published`、`spec.postKind` 索引
+- **新增 postKind 字段**：区分关联内容类型（Post/SinglePage），支持页面评论的链接生成
+- **PromptBuilder 情感提示**：适配 5 级情感分类，新增 VERY_POSITIVE 和 VERY_NEGATIVE 的语气提示
+
+---
+
 ## v1.0.0-beta.2
 
 > 2026-06-17

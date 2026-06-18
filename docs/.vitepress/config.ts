@@ -41,13 +41,14 @@ export default defineConfig({
         text: "其他",
         items: [
           { text: "常见问题", link: "/guide/faq" },
+          { text: "更新日志", link: "/CHANGELOG" },
         ],
       },
     ],
     socialLinks: [
       {
         icon: "github",
-        link: "https://github.com/nxxy335/plugin-comment-ai-autopilot",
+        link: "https://github.com/sunny-335/plugin-comment-ai-autopilot",
       },
     ],
     search: {

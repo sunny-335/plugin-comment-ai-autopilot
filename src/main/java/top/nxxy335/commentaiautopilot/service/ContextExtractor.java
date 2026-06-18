@@ -10,6 +10,7 @@ import run.halo.app.content.ContentWrapper;
 import run.halo.app.content.PostContentService;
 import run.halo.app.core.extension.content.Comment;
 import run.halo.app.core.extension.content.Post;
+import run.halo.app.core.extension.content.SinglePage;
 import run.halo.app.core.extension.content.Reply;
 import run.halo.app.extension.ReactiveExtensionClient;
 
@@ -113,7 +114,8 @@ public class ContextExtractor {
                             isAiConversation,
                             formatPostDate(post),
                             commentCount,
-                            ""
+                            "",
+                            "Post"
                         ))
                     )
                 )
@@ -129,7 +131,47 @@ public class ContextExtractor {
                     isAiConversation,
                     "",
                     0,
-                    ""
+                    "",
+                    "Post"
+                ));
+        }
+
+        if (subjectRef != null && "SinglePage".equals(subjectRef.getKind())) {
+            String postName = subjectRef.getName();
+            return client.fetch(SinglePage.class, postName)
+                .flatMap(singlePage -> getPostContent(postName)
+                    .flatMap(content -> getCommentCount(comment.getMetadata().getName())
+                        .map(commentCount -> new CommentContext(
+                            comment.getMetadata().getName(),
+                            postName,
+                            singlePage.getSpec().getSlug(),
+                            commentContent,
+                            commentOwner,
+                            singlePage.getSpec().getTitle(),
+                            content,
+                            null,
+                            isAiConversation,
+                            formatSinglePageDate(singlePage),
+                            commentCount,
+                            "",
+                            "SinglePage"
+                        ))
+                    )
+                )
+                .defaultIfEmpty(new CommentContext(
+                    comment.getMetadata().getName(),
+                    postName,
+                    "",
+                    commentContent,
+                    commentOwner,
+                    "",
+                    "",
+                    null,
+                    isAiConversation,
+                    "",
+                    0,
+                    "",
+                    "SinglePage"
                 ));
         }
 
@@ -145,6 +187,7 @@ public class ContextExtractor {
             isAiConversation,
             "",
             0,
+            "",
             ""
         ));
     }
@@ -179,7 +222,8 @@ public class ContextExtractor {
                                 isAiConversation,
                                 formatPostDate(post),
                                 commentCount,
-                                history
+                                history,
+                                "Post"
                             ))
                         )
                     )
@@ -196,7 +240,49 @@ public class ContextExtractor {
                     isAiConversation,
                     "",
                     0,
-                    ""
+                    "",
+                    "Post"
+                ));
+        }
+
+        if (subjectRef != null && "SinglePage".equals(subjectRef.getKind())) {
+            String postName = subjectRef.getName();
+            return client.fetch(SinglePage.class, postName)
+                .flatMap(singlePage -> getPostContent(postName)
+                    .flatMap(content -> getCommentCount(commentName)
+                        .flatMap(commentCount -> historyMono
+                            .map(history -> new CommentContext(
+                                commentName,
+                                postName,
+                                singlePage.getSpec().getSlug(),
+                                replyContent,
+                                replyOwner,
+                                singlePage.getSpec().getTitle(),
+                                content,
+                                replyName,
+                                isAiConversation,
+                                formatSinglePageDate(singlePage),
+                                commentCount,
+                                history,
+                                "SinglePage"
+                            ))
+                        )
+                    )
+                )
+                .defaultIfEmpty(new CommentContext(
+                    commentName,
+                    postName,
+                    "",
+                    replyContent,
+                    replyOwner,
+                    "",
+                    "",
+                    replyName,
+                    isAiConversation,
+                    "",
+                    0,
+                    "",
+                    "SinglePage"
                 ));
         }
 
@@ -213,7 +299,8 @@ public class ContextExtractor {
                 isAiConversation,
                 "",
                 0,
-                history
+                history,
+                ""
             ));
     }
 
@@ -290,6 +377,18 @@ public class ContextExtractor {
         return "";
     }
 
+    private String formatSinglePageDate(SinglePage singlePage) {
+        var publishTime = singlePage.getSpec().getPublishTime();
+        if (publishTime != null) {
+            return publishTime.toString().substring(0, 10);
+        }
+        var creationTimestamp = singlePage.getMetadata().getCreationTimestamp();
+        if (creationTimestamp != null) {
+            return creationTimestamp.toString().substring(0, 10);
+        }
+        return "";
+    }
+
     private Mono<Integer> getCommentCount(String commentName) {
         return client.list(Reply.class,
                 reply -> commentName.equals(reply.getSpec().getCommentName()),
@@ -311,6 +410,7 @@ public class ContextExtractor {
         boolean isAiConversation,
         String postDate,
         int commentCount,
-        String conversationHistory
+        String conversationHistory,
+        String postKind
     ) {}
 }
