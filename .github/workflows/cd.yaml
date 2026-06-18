@@ -15,11 +15,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG_NAME="${{ github.event.release.tag_name }}"
-          # List all existing assets and delete them
-          gh release view "$TAG_NAME" --json assets --jq '.assets[].name' 2>/dev/null | while read -r filename; do
-            echo "Deleting existing asset: $filename"
-            gh release delete-asset "$TAG_NAME" "$filename" --yes 2>/dev/null || true
-          done
+          # Capture asset list first to avoid pipefail issues
+          ASSETS=$(gh release view "$TAG_NAME" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          if [ -n "$ASSETS" ]; then
+            echo "$ASSETS" | while read -r filename; do
+              echo "Deleting existing asset: $filename"
+              gh release delete-asset "$TAG_NAME" "$filename" --yes 2>/dev/null || true
+            done
+          else
+            echo "No existing assets to delete"
+          fi
         shell: bash
 
   cd:
