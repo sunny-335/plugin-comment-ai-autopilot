@@ -49,7 +49,8 @@ public class AiReplyOrchestrator {
                                CommentReplyPublisher commentReplyPublisher,
                                FilterService filterService,
                                RateLimitService rateLimitService,
-                               ReactiveExtensionClient client) {
+                               ReactiveExtensionClient client,
+                               ObjectMapper objectMapper) {
         this.contextExtractor = contextExtractor;
         this.promptBuilder = promptBuilder;
         this.aiReplyService = aiReplyService;
@@ -59,7 +60,7 @@ public class AiReplyOrchestrator {
         this.filterService = filterService;
         this.rateLimitService = rateLimitService;
         this.client = client;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
     }
 
     /**

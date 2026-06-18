@@ -8,9 +8,8 @@ import run.halo.app.core.extension.content.Reply;
 import run.halo.app.extension.Metadata;
 import run.halo.app.extension.ReactiveExtensionClient;
 import top.nxxy335.commentaiautopilot.extension.AiPersona;
+import top.nxxy335.commentaiautopilot.util.GravatarUtil;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -120,7 +119,7 @@ public class CommentReplyPublisher {
             ownerAnnotations.put("comment-ai-autopilot.nxxy335.top/is-ai", "true");
             // 使用Gravatar邮箱头像
             if (email != null && !email.isBlank()) {
-                String gravatarUrl = generateGravatarUrl(email);
+                String gravatarUrl = GravatarUtil.generateUrl(email);
                 ownerAnnotations.put(Comment.CommentOwner.AVATAR_ANNO, gravatarUrl);
             }
             owner.setAnnotations(ownerAnnotations);
@@ -180,23 +179,5 @@ public class CommentReplyPublisher {
 
     private String generateReplyName() {
         return "ai-comment-reply-" + UUID.randomUUID().toString().substring(0, 8);
-    }
-
-    /**
-     * Generate Gravatar URL from email address using SHA-256 hash.
-     */
-    private String generateGravatarUrl(String email) {
-        try {
-            var digest = MessageDigest.getInstance("SHA-256");
-            var hashBytes = digest.digest(email.trim().toLowerCase().getBytes(StandardCharsets.UTF_8));
-            var hexString = new StringBuilder();
-            for (byte b : hashBytes) {
-                hexString.append(String.format("%02x", b));
-            }
-            return "https://cn.cravatar.com/avatar/" + hexString;
-        } catch (Exception e) {
-            log.error("[Publisher] Failed to generate Gravatar URL: {}", e.getMessage());
-            return "";
-        }
     }
 }

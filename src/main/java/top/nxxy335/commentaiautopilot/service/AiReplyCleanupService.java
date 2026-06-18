@@ -17,6 +17,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Flux;
+
 @Component
 @Slf4j
 public class AiReplyCleanupService implements DisposableBean {
@@ -27,9 +30,9 @@ public class AiReplyCleanupService implements DisposableBean {
 
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public AiReplyCleanupService(ReactiveExtensionClient client) {
+    public AiReplyCleanupService(ReactiveExtensionClient client, ObjectMapper objectMapper) {
         this.client = client;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "ai-reply-cleanup");
             t.setDaemon(true);
@@ -40,85 +43,85 @@ public class AiReplyCleanupService implements DisposableBean {
     }
 
     public void dailyCleanup() {
-        try {
-            Boolean enabled = client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
-                .mapNotNull(cm -> {
-                    var data = cm.getData();
-                    if (data == null) return false;
-                    String cleanupJson = data.get("cleanup");
-                    if (cleanupJson == null || cleanupJson.isBlank()) return true;
-                    try {
-                        JsonNode node = objectMapper.readTree(cleanupJson);
-                        return !node.has("cleanupEnabled") || node.get("cleanupEnabled").asBoolean(true);
-                    } catch (Exception e) {
-                        log.warn("[Cleanup] Failed to parse cleanup config: {}", e.getMessage());
-                        return true;
-                    }
-                })
-                .defaultIfEmpty(true)
-                .block();
-
-            if (!Boolean.TRUE.equals(enabled)) {
-                log.debug("[Cleanup] Auto cleanup is disabled, skipping");
-                return;
-            }
-
-            int retentionDays = getRetentionDays();
-            long deleted = executeCleanup(retentionDays);
-            log.info("[Cleanup] Auto cleanup completed, deleted {} records older than {} days", deleted, retentionDays);
-        } catch (Exception e) {
-            log.error("[Cleanup] Error during daily cleanup: {}", e.getMessage(), e);
-        }
+        isCleanupEnabled()
+            .flatMap(enabled -> {
+                if (!Boolean.TRUE.equals(enabled)) {
+                    log.debug("[Cleanup] Auto cleanup is disabled, skipping");
+                    return Mono.empty();
+                }
+                return getRetentionDays()
+                    .flatMap(retentionDays -> executeCleanup(retentionDays)
+                        .doOnNext(deleted -> log.info("[Cleanup] Auto cleanup completed, deleted {} records older than {} days", deleted, retentionDays))
+                    );
+            })
+            .subscribe(
+                null,
+                e -> log.error("[Cleanup] Error during daily cleanup: {}", e.getMessage(), e)
+            );
     }
 
-    public long executeCleanup(int retentionDays) {
+    private Mono<Boolean> isCleanupEnabled() {
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return false;
+                String cleanupJson = data.get("cleanup");
+                if (cleanupJson == null || cleanupJson.isBlank()) return true;
+                try {
+                    JsonNode node = objectMapper.readTree(cleanupJson);
+                    return !node.has("cleanupEnabled") || node.get("cleanupEnabled").asBoolean(true);
+                } catch (Exception e) {
+                    log.warn("[Cleanup] Failed to parse cleanup config: {}", e.getMessage());
+                    return true;
+                }
+            })
+            .defaultIfEmpty(true);
+    }
+
+    public Mono<Long> executeCleanup(int retentionDays) {
         Instant cutoff = Instant.now().minus(retentionDays, ChronoUnit.DAYS);
 
-        var oldRecords = client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
+        return client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
             .filter(r -> {
                 Instant created = r.getMetadata().getCreationTimestamp();
                 return created != null && created.isBefore(cutoff);
             })
             .collectList()
-            .block();
-
-        if (oldRecords == null || oldRecords.isEmpty()) {
-            return 0;
-        }
-
-        long deleted = 0;
-        for (var record : oldRecords) {
-            try {
-                client.delete(record).block();
-                deleted++;
-            } catch (Exception e) {
-                log.warn("[Cleanup] Failed to delete record {}: {}", record.getMetadata().getName(), e.getMessage());
-            }
-        }
-        return deleted;
+            .flatMap(oldRecords -> {
+                if (oldRecords.isEmpty()) {
+                    return Mono.just(0L);
+                }
+                return Flux.fromIterable(oldRecords)
+                    .flatMap(record -> client.delete(record)
+                        .thenReturn(1L)
+                        .onErrorResume(e -> {
+                            log.warn("[Cleanup] Failed to delete record {}: {}", record.getMetadata().getName(), e.getMessage());
+                            return Mono.just(0L);
+                        })
+                    )
+                    .reduce(0L, Long::sum);
+            });
     }
 
-    public int getRetentionDays() {
-        try {
-            return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
-                .mapNotNull(cm -> {
-                    var data = cm.getData();
-                    if (data == null) return 30;
-                    String cleanupJson = data.get("cleanup");
-                    if (cleanupJson == null || cleanupJson.isBlank()) return 30;
-                    try {
-                        JsonNode node = objectMapper.readTree(cleanupJson);
-                        return node.has("retentionDays") ? node.get("retentionDays").asInt(30) : 30;
-                    } catch (Exception e) {
-                        return 30;
-                    }
-                })
-                .defaultIfEmpty(30)
-                .block();
-        } catch (Exception e) {
-            log.warn("[Cleanup] Failed to read retentionDays config: {}", e.getMessage());
-            return 30;
-        }
+    public Mono<Integer> getRetentionDays() {
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return 30;
+                String cleanupJson = data.get("cleanup");
+                if (cleanupJson == null || cleanupJson.isBlank()) return 30;
+                try {
+                    JsonNode node = objectMapper.readTree(cleanupJson);
+                    return node.has("retentionDays") ? node.get("retentionDays").asInt(30) : 30;
+                } catch (Exception e) {
+                    return 30;
+                }
+            })
+            .defaultIfEmpty(30)
+            .onErrorResume(e -> {
+                log.warn("[Cleanup] Failed to read retentionDays config: {}", e.getMessage());
+                return Mono.just(30);
+            });
     }
 
     @Override

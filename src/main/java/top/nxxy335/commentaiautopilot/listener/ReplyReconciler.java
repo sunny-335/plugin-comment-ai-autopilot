@@ -4,17 +4,15 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.scheduler.Schedulers;
-import run.halo.app.core.extension.content.Category;
 import run.halo.app.core.extension.content.Comment;
-import run.halo.app.core.extension.content.Post;
 import run.halo.app.core.extension.content.Reply;
-import run.halo.app.core.extension.content.Tag;
 import run.halo.app.extension.ExtensionClient;
 import run.halo.app.extension.controller.Controller;
 import run.halo.app.extension.controller.ControllerBuilder;
 import run.halo.app.extension.controller.Reconciler;
 import top.nxxy335.commentaiautopilot.extension.AiCommentReply;
 import top.nxxy335.commentaiautopilot.service.AiReplyOrchestrator;
+import top.nxxy335.commentaiautopilot.service.PersonaResolver;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -27,11 +25,11 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
 
     private final ExtensionClient client;
     private final AiReplyOrchestrator orchestrator;
+    private final PersonaResolver personaResolver;
 
     private static final String PROCESSED_ANNOTATION = "comment-ai-autopilot.nxxy335.top/processed";
     private static final String AI_PERSONA_OWNER_PREFIX = "ai-persona-";
     private static final String AI_MARKER_ANNOTATION = "comment-ai-autopilot.nxxy335.top/is-ai";
-    private static final String AI_PERSONA_ANNOTATION = "comment-ai-autopilot.nxxy335.top/ai-persona";
 
     // Record the time when this bean was created (plugin startup time)
     private final Instant pluginStartTime = Instant.now();
@@ -120,7 +118,9 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
             client.update(reply);
 
             // Reply to AI → trigger AI reply (conversation continuation)
-            String personaName = getPersonaNameFromComment(parentCommentName);
+            String personaName = client.fetch(Comment.class, parentCommentName)
+                .map(comment -> personaResolver.getPersonaNameFromCommentBlocking(client, comment))
+                .orElse(null);
             log.info("[ReplyReconciler] Reply to AI detected: {}, triggering conversation, personaName: {}", name, personaName);
             orchestrator.processComment(parentCommentName, name, true, personaName)
                 .subscribeOn(Schedulers.boundedElastic())
@@ -152,65 +152,6 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
                 return false;
             })
             .orElse(false);
-    }
-
-    /**
-     * Read persona name from the post's annotations associated with the parent comment.
-     */
-    private String getPersonaNameFromComment(String commentName) {
-        return client.fetch(Comment.class, commentName)
-            .map(comment -> {
-                var subjectRef = comment.getSpec().getSubjectRef();
-                if (subjectRef == null || !"Post".equals(subjectRef.getKind())) {
-                    return null;
-                }
-                String postName = subjectRef.getName();
-                return client.fetch(Post.class, postName)
-                    .map(post -> {
-                        // 1. 文章注解优先
-                        var annotations = post.getMetadata().getAnnotations();
-                        if (annotations != null) {
-                            String persona = annotations.get(AI_PERSONA_ANNOTATION);
-                            if (persona != null && !persona.isBlank()) {
-                                return persona;
-                            }
-                        }
-                        // 2. 分类注解
-                        var spec = post.getSpec();
-                        if (spec != null && spec.getCategories() != null) {
-                            for (String categoryName : spec.getCategories()) {
-                                var cat = client.fetch(Category.class, categoryName).orElse(null);
-                                if (cat != null) {
-                                    var catAnnotations = cat.getMetadata().getAnnotations();
-                                    if (catAnnotations != null) {
-                                        String catPersona = catAnnotations.get(AI_PERSONA_ANNOTATION);
-                                        if (catPersona != null && !catPersona.isBlank()) {
-                                            return catPersona;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // 3. 标签注解
-                        if (spec != null && spec.getTags() != null) {
-                            for (String tagName : spec.getTags()) {
-                                var tag = client.fetch(Tag.class, tagName).orElse(null);
-                                if (tag != null) {
-                                    var tagAnnotations = tag.getMetadata().getAnnotations();
-                                    if (tagAnnotations != null) {
-                                        String tagPersona = tagAnnotations.get(AI_PERSONA_ANNOTATION);
-                                        if (tagPersona != null && !tagPersona.isBlank()) {
-                                            return tagPersona;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        return null;
-                    })
-                    .orElse(null);
-            })
-            .orElse(null);
     }
 
     private boolean isProcessed(Map<String, String> annotations) {

@@ -863,7 +863,10 @@ const fetchSettings = async () => {
       if (Object.keys(prompt).length) { settings.prompt.customPromptTemplate = (prompt.customPromptTemplate as string) || ""; const ep = prompt.enabledPresets; settings.prompt.enabledPresets = Array.isArray(ep) ? ep : (typeof ep === 'string' ? (ep as string).split(",").map((s: string) => s.trim()).filter(Boolean) : []) }
       if (Object.keys(cleanup).length) { settings.cleanup.cleanupEnabled = cleanup.cleanupEnabled !== false; settings.cleanup.retentionDays = (cleanup.retentionDays as number) || 30 }
     }
-  } catch (e) { console.error("Failed to fetch settings", e) }
+  } catch (e) {
+    console.error("Failed to fetch settings", e)
+    Toast.error("加载设置失败，请刷新页面重试")
+  }
   finally {
     loading.value = false
     // Update snapshot after fetch to reset unsaved indicator

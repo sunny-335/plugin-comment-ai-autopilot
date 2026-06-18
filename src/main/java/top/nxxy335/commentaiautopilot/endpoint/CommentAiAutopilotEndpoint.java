@@ -8,7 +8,6 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import run.halo.app.core.extension.content.Comment;
-import run.halo.app.core.extension.content.Post;
 import run.halo.app.core.extension.content.Reply;
 import run.halo.app.core.extension.endpoint.CustomEndpoint;
 import run.halo.app.extension.ConfigMap;
@@ -16,6 +15,7 @@ import run.halo.app.extension.Metadata;
 import run.halo.app.extension.GroupVersion;
 import run.halo.app.extension.ListOptions;
 import run.halo.app.extension.ListResult;
+import run.halo.app.extension.index.query.Queries;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.app.extension.PageRequestImpl;
 import top.nxxy335.commentaiautopilot.extension.AiCommentReply;
@@ -24,6 +24,8 @@ import top.nxxy335.commentaiautopilot.service.AiFoundationClient;
 import top.nxxy335.commentaiautopilot.service.AiReplyCleanupService;
 import top.nxxy335.commentaiautopilot.service.AiReplyOrchestrator;
 import top.nxxy335.commentaiautopilot.service.CommentReplyPublisher;
+import top.nxxy335.commentaiautopilot.service.PersonaResolver;
+import top.nxxy335.commentaiautopilot.util.GravatarUtil;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -56,16 +58,18 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     private final AiFoundationClient aiFoundationClient;
     private final CommentReplyPublisher commentReplyPublisher;
     private final ObjectMapper objectMapper;
+    private final PersonaResolver personaResolver;
 
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, AiFoundationClient aiFoundationClient, CommentReplyPublisher commentReplyPublisher) {
+    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, AiFoundationClient aiFoundationClient, CommentReplyPublisher commentReplyPublisher, ObjectMapper objectMapper, PersonaResolver personaResolver) {
         this.client = client;
         this.orchestrator = orchestrator;
         this.cleanupService = cleanupService;
         this.aiFoundationClient = aiFoundationClient;
         this.commentReplyPublisher = commentReplyPublisher;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
+        this.personaResolver = personaResolver;
     }
 
     @Override
@@ -133,19 +137,26 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         final Instant finalStartInstant = startInstant;
         final Instant finalEndInstant = endInstant;
 
-        // Check if we need in-memory filtering (keyword, date range, status, or sentiment)
-        boolean needsMemoryFilter = !keywordFilter.isBlank() || finalStartInstant != null || finalEndInstant != null
-            || !statusFilter.isBlank() || !sentimentFilter.isBlank();
+        // Check if we need in-memory filtering (keyword or date range)
+        boolean needsMemoryFilter = !keywordFilter.isBlank() || finalStartInstant != null || finalEndInstant != null;
+
+        // Build server-side query for status and sentiment (indexed fields)
+        var listOptionsBuilder = ListOptions.builder();
+        if (!statusFilter.isBlank()) {
+            listOptionsBuilder.andQuery(Queries.equal("spec.status", statusFilter));
+        }
+        if (!sentimentFilter.isBlank()) {
+            listOptionsBuilder.andQuery(Queries.equal("spec.sentiment", sentimentFilter));
+        }
+        var listOptions = listOptionsBuilder.build();
 
         if (needsMemoryFilter) {
-            // Fall back to listAll + in-memory filter for complex queries
-            return client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
+            // Fall back to listAll + in-memory filter for keyword/date queries
+            return client.listAll(AiCommentReply.class, listOptions, Sort.unsorted())
                 .collectList()
                 .map(replies -> {
                     var filtered = replies.stream()
                         .filter(r -> {
-                            if (!statusFilter.isBlank() && !statusFilter.equals(r.getSpec().getStatus())) return false;
-                            if (!sentimentFilter.isBlank() && !sentimentFilter.equals(r.getSpec().getSentiment())) return false;
                             if (!keywordFilter.isBlank()) {
                                 String reply = r.getSpec().getReply();
                                 if (reply == null || !reply.contains(keywordFilter)) return false;
@@ -184,12 +195,10 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                 .flatMap(result -> ServerResponse.ok().bodyValue(result));
         }
 
-        // No filters - use server-side pagination directly
+        // No memory filters needed - use server-side pagination directly
         Sort sort = "asc".equalsIgnoreCase(sortOrder)
             ? Sort.by(Sort.Order.asc("metadata.creationTimestamp"))
             : Sort.by(Sort.Order.desc("metadata.creationTimestamp"));
-
-        var listOptions = ListOptions.builder().build();
 
         return client.listBy(AiCommentReply.class, listOptions,
                 PageRequestImpl.of(page - 1, size, sort))
@@ -246,18 +255,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .next()
             .flatMap(persona -> {
                 String email = persona.getSpec().getEmail();
-                String avatarUrl = "";
-                if (email != null && !email.isBlank()) {
-                    try {
-                        var digest = java.security.MessageDigest.getInstance("SHA-256");
-                        var hashBytes = digest.digest(email.trim().toLowerCase().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                        var hexString = new StringBuilder();
-                        for (byte b : hashBytes) {
-                            hexString.append(String.format("%02x", b));
-                        }
-                        avatarUrl = "https://cn.cravatar.com/avatar/" + hexString;
-                    } catch (Exception ignored) {}
-                }
+                String avatarUrl = GravatarUtil.generateUrl(email);
                 return ServerResponse.ok().bodyValue(Map.of(
                     "name", persona.getSpec().getDisplayName(),
                     "prompt", persona.getSpec().getPrompt() != null ? persona.getSpec().getPrompt() : "",
@@ -297,8 +295,9 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     "comment", commentOwner, commentContent, commentTime, isCommentAi
                 );
 
-                return client.listAll(Reply.class, ListOptions.builder().build(), Sort.unsorted())
-                    .filter(reply -> commentName.equals(reply.getSpec().getCommentName()))
+                return client.list(Reply.class,
+                        reply -> commentName.equals(reply.getSpec().getCommentName()),
+                        null)
                     .sort(Comparator.comparing(r -> r.getMetadata().getCreationTimestamp()))
                     .map(reply -> {
                         var replyOwner = extractOwnerName(reply.getSpec().getOwner());
@@ -642,7 +641,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                         .bodyValue(Map.of("message", "该评论已有AI回复记录"));
                 }
                 // Read persona name from post annotations
-                return getPersonaNameFromComment(commentName)
+                return personaResolver.getPersonaNameFromComment(commentName)
                     .flatMap(personaName ->
                         orchestrator.processComment(commentName, null, false, personaName)
                             .then(ServerResponse.ok().bodyValue(Map.of("message", "已触发AI回复")))
@@ -669,7 +668,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                             return ServerResponse.badRequest()
                                 .bodyValue(Map.of("message", "该回复已有AI对话记录"));
                         }
-                        return getPersonaNameFromComment(commentName)
+                        return personaResolver.getPersonaNameFromComment(commentName)
                             .flatMap(personaName ->
                                 orchestrator.processComment(commentName, replyName, true, personaName)
                                     .then(ServerResponse.ok().bodyValue(Map.of("message", "已触发AI对话回复")))
@@ -677,31 +676,6 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     });
             })
             .switchIfEmpty(ServerResponse.notFound().build());
-    }
-
-    private static final String AI_PERSONA_ANNOTATION = "comment-ai-autopilot.nxxy335.top/ai-persona";
-
-    private Mono<String> getPersonaNameFromComment(String commentName) {
-        return client.fetch(Comment.class, commentName)
-            .flatMap(comment -> {
-                var subjectRef = comment.getSpec().getSubjectRef();
-                if (subjectRef == null || !"Post".equals(subjectRef.getKind())) {
-                    return Mono.justOrEmpty(null);
-                }
-                String postName = subjectRef.getName();
-                return client.fetch(Post.class, postName)
-                    .mapNotNull(post -> {
-                        var annotations = post.getMetadata().getAnnotations();
-                        if (annotations != null) {
-                            String persona = annotations.get(AI_PERSONA_ANNOTATION);
-                            if (persona != null && !persona.isBlank()) {
-                                return persona;
-                            }
-                        }
-                        return null;
-                    });
-            })
-            .defaultIfEmpty("");
     }
 
     private Mono<Reply> findReplyForRecord(AiCommentReply record) {
@@ -748,7 +722,8 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     ) {}
 
     private Mono<ServerResponse> listCommenters(ServerRequest request) {
-        return client.listAll(Comment.class, ListOptions.builder().build(), Sort.unsorted())
+        return client.list(Comment.class, null, null)
+            .take(1000)
             .collectList()
             .map(comments -> {
                 Set<String> seen = new HashSet<>();
@@ -766,7 +741,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                         if (owner.getAnnotations() != null && owner.getAnnotations().get(Comment.CommentOwner.AVATAR_ANNO) != null) {
                             avatarUrl = owner.getAnnotations().get(Comment.CommentOwner.AVATAR_ANNO);
                         } else if (!email.isBlank()) {
-                            avatarUrl = generateGravatarUrl(email);
+                            avatarUrl = GravatarUtil.generateUrl(email);
                         }
                         result.add(new CommenterInfo(displayName, email, avatarUrl));
                     }
@@ -776,26 +751,11 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .flatMap(commenters -> ServerResponse.ok().bodyValue(commenters));
     }
 
-    private String generateGravatarUrl(String email) {
-        try {
-            var digest = java.security.MessageDigest.getInstance("SHA-256");
-            var hashBytes = digest.digest(email.trim().toLowerCase().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            var hexString = new StringBuilder();
-            for (byte b : hashBytes) {
-                hexString.append(String.format("%02x", b));
-            }
-            return "https://cn.cravatar.com/avatar/" + hexString;
-        } catch (Exception e) {
-            return "";
-        }
-    }
-
     private Mono<ServerResponse> triggerCleanup(ServerRequest request) {
-        return Mono.fromCallable(() -> {
-                int retentionDays = cleanupService.getRetentionDays();
-                long deleted = cleanupService.executeCleanup(retentionDays);
-                return Map.of("deletedCount", deleted, "retentionDays", retentionDays);
-            })
+        return cleanupService.getRetentionDays()
+            .flatMap(retentionDays -> cleanupService.executeCleanup(retentionDays)
+                .map(deleted -> Map.of("deletedCount", deleted, "retentionDays", retentionDays))
+            )
             .flatMap(result -> ServerResponse.ok().bodyValue(result))
             .onErrorResume(e -> {
                 log.warn("Failed to trigger cleanup: {}", e.getMessage());
@@ -961,7 +921,6 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     for (var personaData : personasList) {
                         importMono = importMono.then(Mono.defer(() -> {
                             try {
-                                var objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
                                 var personaJson = objectMapper.writeValueAsString(personaData);
                                 var persona = objectMapper.readValue(personaJson, AiPersona.class);
                                 var personaName = persona.getMetadata().getName();

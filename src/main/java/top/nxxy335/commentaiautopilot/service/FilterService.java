@@ -28,9 +28,9 @@ public class FilterService {
     private static final String ANNOTATION_KEY = "comment-ai-autopilot.nxxy335.top/ai-reply-enabled";
     private static final String GROUP_CONTENT = "content.halo.run";
 
-    public FilterService(ReactiveExtensionClient client) {
+    public FilterService(ReactiveExtensionClient client, ObjectMapper objectMapper) {
         this.client = client;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
     }
 
     public Mono<Boolean> shouldProcess(Comment comment) {

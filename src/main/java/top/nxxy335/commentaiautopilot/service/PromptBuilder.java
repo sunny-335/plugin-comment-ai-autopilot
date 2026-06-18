@@ -20,9 +20,9 @@ public class PromptBuilder {
     private final ObjectMapper objectMapper;
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public PromptBuilder(ReactiveExtensionClient client) {
+    public PromptBuilder(ReactiveExtensionClient client, ObjectMapper objectMapper) {
         this.client = client;
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = objectMapper;
     }
 
     private static final String PRESET_FRIENDLY = """
