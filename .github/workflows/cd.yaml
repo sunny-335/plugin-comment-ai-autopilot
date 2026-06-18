@@ -6,7 +6,24 @@ on:
       - published
 
 jobs:
+  # Pre-cleanup: delete all existing assets from the release to avoid gh release upload failure
+  pre-release-cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete Existing Release Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          # List all existing assets and delete them
+          gh release view "$TAG_NAME" --json assets --jq '.assets[].name' 2>/dev/null | while read -r filename; do
+            echo "Deleting existing asset: $filename"
+            gh release delete-asset "$TAG_NAME" "$filename" --yes 2>/dev/null || true
+          done
+        shell: bash
+
   cd:
+    needs: pre-release-cleanup
     uses: halo-sigs/reusable-workflows/.github/workflows/plugin-cd.yaml@v4
     permissions:
       contents: write
