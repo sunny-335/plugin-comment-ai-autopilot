@@ -80,63 +80,63 @@ public class CommentReplyPublisher {
     private Mono<Reply> doPublish(String parentCommentName, String replyContent,
                                    String postName, String quoteReplyName, boolean autoPublish,
                                    String personaName) {
-        return resolvePersona(personaName).flatMap(persona -> {
-            String displayName = persona.displayName();
-            String email = persona.email();
 
-            Reply reply = new Reply();
-            reply.setMetadata(new Metadata());
-            reply.getMetadata().setName(generateReplyName());
-            reply.setSpec(new Reply.ReplySpec());
+        // 解析 AI 角色并直接发布纯净的回复内容
+        return resolvePersona(personaName)
+            .flatMap(persona -> {
+                String displayName = persona.displayName();
+                String email = persona.email();
 
-            var spec = reply.getSpec();
-            spec.setCommentName(parentCommentName);
-            spec.setRaw(replyContent);
-            spec.setContent(replyContent);
-            spec.setApproved(autoPublish);
-            if (autoPublish) {
-                spec.setApprovedTime(Instant.now());
-            }
-            spec.setPriority(0);
-            spec.setTop(false);
-            spec.setAllowNotification(false);
-            spec.setHidden(false);
+                Reply reply = new Reply();
+                reply.setMetadata(new Metadata());
+                reply.getMetadata().setName(generateReplyName());
+                reply.setSpec(new Reply.ReplySpec());
 
-            if (quoteReplyName != null && !quoteReplyName.isBlank()) {
-                spec.setQuoteReply(quoteReplyName);
-            }
+                var spec = reply.getSpec();
+                spec.setCommentName(parentCommentName);
 
-            var owner = new Comment.CommentOwner();
-            owner.setKind(Comment.CommentOwner.KIND_EMAIL);
-            if (email != null && !email.isBlank()) {
-                owner.setName(email);
-            } else {
-                owner.setName(AI_PERSONA_OWNER_PREFIX + displayName);
-            }
-            owner.setDisplayName(displayName + " AI");
+                // 直接存入纯净的 AI 回复内容，不加任何 Markdown 前缀
+                spec.setRaw(replyContent);
+                spec.setContent(replyContent);
 
-            Map<String, String> ownerAnnotations = new HashMap<>();
-            ownerAnnotations.put("comment-ai-autopilot.nxxy335.top/is-ai", "true");
-            // 使用Gravatar邮箱头像
-            if (email != null && !email.isBlank()) {
-                String gravatarUrl = GravatarUtil.generateUrl(email);
-                ownerAnnotations.put(Comment.CommentOwner.AVATAR_ANNO, gravatarUrl);
-            }
-            owner.setAnnotations(ownerAnnotations);
-            spec.setOwner(owner);
+                spec.setApproved(autoPublish);
+                if (autoPublish) {
+                    spec.setApprovedTime(Instant.now());
+                }
+                spec.setPriority(0);
+                spec.setTop(false);
+                spec.setAllowNotification(false);
+                spec.setHidden(false);
 
-            log.info("[Publisher] Creating reply for comment: {}, owner: kind={}, name={}, displayName={}, annotations={}",
-                parentCommentName, owner.getKind(), owner.getName(), owner.getDisplayName(), ownerAnnotations);
+                // Halo 原生评论组件正是靠这个字段来渲染 "回复 @某人" 的
+                if (quoteReplyName != null && !quoteReplyName.isBlank()) {
+                    spec.setQuoteReply(quoteReplyName);
+                }
 
-            return client.create(reply)
-                .doOnSuccess(created -> {
-                    var createdOwner = created.getSpec().getOwner();
-                    log.info("[Publisher] AI Persona '{}' reply published for comment: {}, quoteReply: {}, owner annotations after create: {}",
-                        displayName, parentCommentName, quoteReplyName,
-                        createdOwner != null ? createdOwner.getAnnotations() : "null");
-                })
-                .doOnError(e -> log.error("[Publisher] Failed to publish AI reply: {}", e.getMessage()));
-        });
+                var owner = new Comment.CommentOwner();
+                owner.setKind(Comment.CommentOwner.KIND_EMAIL);
+                if (email != null && !email.isBlank()) {
+                    owner.setName(email);
+                } else {
+                    owner.setName(AI_PERSONA_OWNER_PREFIX + displayName);
+                }
+                owner.setDisplayName(displayName + " AI");
+
+                Map<String, String> ownerAnnotations = new HashMap<>();
+                ownerAnnotations.put("comment-ai-autopilot.nxxy335.top/is-ai", "true");
+                if (email != null && !email.isBlank()) {
+                    String gravatarUrl = GravatarUtil.generateUrl(email);
+                    ownerAnnotations.put(Comment.CommentOwner.AVATAR_ANNO, gravatarUrl);
+                }
+                owner.setAnnotations(ownerAnnotations);
+                spec.setOwner(owner);
+
+                log.info("[Publisher] Creating reply for comment: {}, content length: {}", parentCommentName, replyContent.length());
+
+                return client.create(reply)
+                    .doOnSuccess(created -> log.info("[Publisher] AI Persona '{}' reply published for comment: {}", displayName, parentCommentName))
+                    .doOnError(e -> log.error("[Publisher] Failed to publish AI reply: {}", e.getMessage()));
+            });
     }
 
     /**

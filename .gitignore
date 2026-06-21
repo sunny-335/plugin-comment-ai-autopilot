@@ -63,12 +63,19 @@ lerna-debug.log*
 *.ctxt
 
 ### Package Files
+*.jar
 *.war
 *.nar
 *.ear
 *.zip
 *.tar.gz
 *.rar
+
+### UI build output
+ui/dist/
+ui/dist-ssr/
+ui/*.local
+ui/.eslintcache
 
 ### Local file
 application-local.yml

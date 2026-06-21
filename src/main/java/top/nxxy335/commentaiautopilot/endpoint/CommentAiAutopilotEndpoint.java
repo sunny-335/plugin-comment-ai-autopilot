@@ -291,26 +291,51 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                 var commentTime = String.valueOf(comment.getMetadata().getCreationTimestamp());
                 var isCommentAi = isAiOwner(comment.getSpec().getOwner());
 
+                // 首条评论没有引用对象
                 var commentMsg = new ConversationMessage(
-                    "comment", commentOwner, commentContent, commentTime, isCommentAi
+                    "comment", commentOwner, commentContent, commentTime, isCommentAi, null, null
                 );
 
                 return client.list(Reply.class,
                         reply -> commentName.equals(reply.getSpec().getCommentName()),
                         null)
                     .sort(Comparator.comparing(r -> r.getMetadata().getCreationTimestamp()))
-                    .map(reply -> {
-                        var replyOwner = extractOwnerName(reply.getSpec().getOwner());
-                        var replyContent = extractContent(reply.getSpec().getRaw(), reply.getSpec().getContent());
-                        var replyTime = String.valueOf(reply.getMetadata().getCreationTimestamp());
-                        var isAi = isAiOwner(reply.getSpec().getOwner());
-                        return new ConversationMessage("reply", replyOwner, replyContent, replyTime, isAi);
-                    })
-                    .collectList()
+                    .collectList() // 收集为List以便统一处理引用映射
                     .map(replyList -> {
                         List<ConversationMessage> messages = new ArrayList<>();
                         messages.add(commentMsg);
-                        messages.addAll(replyList);
+
+                        // 构建 Reply 的映射字典，方便查找引用关系
+                        Map<String, Reply> replyMap = new HashMap<>();
+                        for (Reply r : replyList) {
+                            replyMap.put(r.getMetadata().getName(), r);
+                        }
+
+                        for (Reply reply : replyList) {
+                            var replyOwner = extractOwnerName(reply.getSpec().getOwner());
+                            var replyContent = extractContent(reply.getSpec().getRaw(), reply.getSpec().getContent());
+                            var replyTime = String.valueOf(reply.getMetadata().getCreationTimestamp());
+                            var isAi = isAiOwner(reply.getSpec().getOwner());
+
+                            String quoteOwner = null;
+                            String quoteContent = null;
+
+                            // 获取引用的 Reply 名称 (Halo中如果为空，代表直接回复顶级 Comment)
+                            String quoteReplyName = reply.getSpec().getQuoteReply();
+                            if (quoteReplyName != null && !quoteReplyName.isBlank()) {
+                                Reply quotedReply = replyMap.get(quoteReplyName);
+                                if (quotedReply != null) {
+                                    quoteOwner = extractOwnerName(quotedReply.getSpec().getOwner());
+                                    quoteContent = extractContent(quotedReply.getSpec().getRaw(), quotedReply.getSpec().getContent());
+                                }
+                            } else {
+                                // 没有 quoteReply 表示直接回复首条评论
+                                quoteOwner = commentOwner;
+                                quoteContent = commentContent;
+                            }
+
+                            messages.add(new ConversationMessage("reply", replyOwner, replyContent, replyTime, isAi, quoteOwner, quoteContent));
+                        }
                         return messages;
                     });
             })
@@ -712,7 +737,9 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         String owner,
         String content,
         String time,
-        boolean isAi
+        boolean isAi,
+        String quoteOwner,
+        String quoteContent
     ) {}
 
     public record CommenterInfo(
