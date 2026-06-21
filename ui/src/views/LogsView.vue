@@ -134,7 +134,17 @@
                   <div class="text-xs mb-1.5 px-1 font-medium" :class="msg.isAi ? 'text-blue-600' : 'text-gray-500 text-right'">
                     {{ msg.owner }}
                   </div>
-                  <div class="rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm break-words" :class="msg.isAi ? 'bg-white border border-blue-100 text-gray-800 rounded-tl-sm' : 'bg-blue-600 text-white rounded-tr-sm'" v-html="renderContent(msg.content, msg.isAi)"></div>
+                  <div class="rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm break-words" :class="msg.isAi ? 'bg-white border border-blue-100 text-gray-800 rounded-tl-sm' : 'bg-blue-600 text-white rounded-tr-sm'">
+                    <!-- 引用摘要模块（如果该条消息有回复对象，则渲染） -->
+                    <div v-if="msg.quoteOwner && msg.quoteContent"
+                         class="mb-2.5 px-3 py-2 rounded-lg border-l-[3px] text-xs"
+                         :class="msg.isAi ? 'bg-gray-50 border-gray-300 text-gray-500' : 'bg-black/10 border-white/40 text-blue-100'">
+                      <span class="font-semibold" :class="msg.isAi ? 'text-gray-700' : 'text-white'">@{{ msg.quoteOwner }}</span>：
+                      {{ truncateQuote(msg.quoteContent, 40) }}
+                    </div>
+                    <!-- 实际发言内容 -->
+                    <div v-html="renderContent(msg.content)"></div>
+                  </div>
                   <div class="text-[11px] text-gray-400 mt-1.5 px-1" :class="msg.isAi ? 'text-left' : 'text-right'">
                     {{ formatDate(msg.time) }}
                   </div>
@@ -169,6 +179,8 @@ interface ConversationMessage {
   content: string
   time: string
   isAi: boolean
+  quoteOwner?: string
+  quoteContent?: string
 }
 
 const replies = ref<AiCommentReplyItem[]>([])
@@ -269,24 +281,18 @@ const stripHtml = (html: string) => {
   return html.replace(/<[^>]+>/g, "").replace(/\n+/g, " ").trim()
 }
 
-const renderContent = (content: string, isAi: boolean) => {
+const truncateQuote = (content: string, length = 40) => {
+  if (!content) return ""
+  const plain = stripHtml(content)
+  return plain.length > length ? plain.substring(0, length) + "..." : plain
+}
+
+const renderContent = (content: string) => {
   if (!content) return "<span class='opacity-50'>(空)</span>"
-  let parsed = content
+  return content
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, "")
-    
-  parsed = parsed.replace(/^>\s*(?:💬\s*)?\*\*(.*?)\*\*\s*[:：]\s*(.*?)$/gm, (match, name, text) => {
-    const quoteBg = isAi ? 'bg-blue-50 border-blue-200' : 'bg-white/20 border-white/30'
-    const nameColor = isAi ? 'text-blue-700' : 'text-white font-semibold'
-    const textColor = isAi ? 'text-gray-600' : 'text-blue-100'
-    return `<div class="mb-3 px-3 py-2 rounded-lg border-l-4 ${quoteBg} text-xs">
-              <span class="${nameColor}">@${name.replace(/💬|🤖/g, '').trim()}</span>: 
-              <span class="${textColor} opacity-90">${text.trim()}</span>
-            </div>`
-  })
-
-  parsed = parsed.replace(/\n/g, "<br/>")
-  return parsed
+    .replace(/\n/g, "<br/>")
 }
 
 const resetFilters = () => { filterStatus.value = ""; filterSentiment.value = ""; filterKeyword.value = ""; page.value = 1; fetchReplies() }
