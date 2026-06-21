@@ -283,16 +283,22 @@ const stripHtml = (html: string) => {
 
 const truncateQuote = (content: string, length = 40) => {
   if (!content) return ""
-  const plain = stripHtml(content)
+  let plain = stripHtml(content)
+  // 清理旧版本测试时残留的 Markdown 引用文本，防止摘要里套娃
+  plain = plain.replace(/^>\s*(?:💬\s*)?\*\*(.*?)\*\*\s*[:：]\s*/gm, '').trim()
   return plain.length > length ? plain.substring(0, length) + "..." : plain
 }
 
 const renderContent = (content: string) => {
   if (!content) return "<span class='opacity-50'>(空)</span>"
-  return content
+  let parsed = content
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, "")
-    .replace(/\n/g, "<br/>")
+
+  // 清理之前测试时已经存入数据库的历史遗留 "> 💬 @某人 :" 文本
+  parsed = parsed.replace(/^>\s*(?:💬\s*)?\*\*(.*?)\*\*\s*[:：]\s*/gm, "")
+
+  return parsed.replace(/\n/g, "<br/>")
 }
 
 const resetFilters = () => { filterStatus.value = ""; filterSentiment.value = ""; filterKeyword.value = ""; page.value = 1; fetchReplies() }
