@@ -30,4 +30,4 @@ spec:
       url: "https://github.com/sunny-335/plugin-comment-ai-autopilot/blob/main/LICENSE"
   settingName: "comment-ai-autopilot-settings"
   configMapName: "comment-ai-autopilot-configmap"
-  version: "1.0.1"
+  version: "1.0.2"
