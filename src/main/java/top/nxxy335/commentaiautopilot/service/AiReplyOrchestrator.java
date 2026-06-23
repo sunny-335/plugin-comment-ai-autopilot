@@ -31,6 +31,7 @@ public class AiReplyOrchestrator {
     private final CommentReplyPublisher commentReplyPublisher;
     private final FilterService filterService;
     private final RateLimitService rateLimitService;
+    private final CommentPreFilterService preFilterService;
     private final ReactiveExtensionClient client;
     private final ObjectMapper objectMapper;
 
@@ -49,6 +50,7 @@ public class AiReplyOrchestrator {
                                CommentReplyPublisher commentReplyPublisher,
                                FilterService filterService,
                                RateLimitService rateLimitService,
+                               CommentPreFilterService preFilterService,
                                ReactiveExtensionClient client,
                                ObjectMapper objectMapper) {
         this.contextExtractor = contextExtractor;
@@ -59,6 +61,7 @@ public class AiReplyOrchestrator {
         this.commentReplyPublisher = commentReplyPublisher;
         this.filterService = filterService;
         this.rateLimitService = rateLimitService;
+        this.preFilterService = preFilterService;
         this.client = client;
         this.objectMapper = objectMapper;
     }
@@ -209,14 +212,25 @@ public class AiReplyOrchestrator {
                                   String personaName) {
         return getModelName().flatMap(modelName ->
             contextExtractor.extract(commentName, replyName, isAiConversation)
-                .flatMap(context -> sentimentService.analyzeSentiment(context.commentContent(), modelName)
-                    .flatMap(sentimentResult -> {
-                        log.info("[Orchestrator] Sentiment for {}: {} (confidence: {})",
-                            commentName, sentimentResult.sentiment(), sentimentResult.confidence());
-                        return promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
-                            .flatMap(prompt -> createAiCommentReply(context, sentimentResult.sentiment(), personaName)
-                                .flatMap(replyRecord -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
-                            );
+                .flatMap(context -> preFilterService.check(context.commentContent(), modelName)
+                    .flatMap(preFilterResult -> {
+                        if (!preFilterResult.passed()) {
+                            log.warn("[Orchestrator] Comment pre-filtered: {}, reason: {}",
+                                commentName, preFilterResult.reason());
+                            // 创建拦截记录并执行处罚（针对实际违规的 Comment 或 Reply）
+                            return createFilteredRecord(context, preFilterResult)
+                                .then(preFilterService.penalize(commentName, replyName))
+                                .then();
+                        }
+                        return sentimentService.analyzeSentiment(context.commentContent(), modelName)
+                            .flatMap(sentimentResult -> {
+                                log.info("[Orchestrator] Sentiment for {}: {} (confidence: {})",
+                                    commentName, sentimentResult.sentiment(), sentimentResult.confidence());
+                                return promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
+                                    .flatMap(prompt -> createAiCommentReply(context, sentimentResult.sentiment(), personaName)
+                                        .flatMap(replyRecord -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
+                                    );
+                            });
                     })
                 )
         );
@@ -572,6 +586,34 @@ public class AiReplyOrchestrator {
                 return Mono.empty();
             })
             .defaultIfEmpty(10);
+    }
+
+    /**
+     * 创建被前置过滤拦截的记录。
+     */
+    private Mono<AiCommentReply> createFilteredRecord(ContextExtractor.CommentContext context,
+                                                        CommentPreFilterService.PreFilterResult preFilterResult) {
+        AiCommentReply record = new AiCommentReply();
+        record.setMetadata(new Metadata());
+        record.getMetadata().setName("ai-reply-" + UUID.randomUUID().toString().substring(0, 8));
+        record.setSpec(new AiCommentReply.Spec());
+        record.getSpec().setCommentId(context.commentId());
+        record.getSpec().setPostId(context.postId());
+        record.getSpec().setPostSlug(context.postSlug());
+        record.getSpec().setPostKind(context.postKind());
+        record.getSpec().setReply("");
+        record.getSpec().setScore(0);
+        record.getSpec().setStatus("FILTERED");
+        record.getSpec().setRetryCount(0);
+        record.getSpec().setReplyTo(context.replyTo());
+        record.getSpec().setIsAiConversation(context.isAiConversation());
+        record.getSpec().setPublished(false);
+        record.getSpec().setSentiment("NEUTRAL");
+        record.getSpec().setFilterCategory(preFilterResult.category());
+        record.getSpec().setFilterReason(preFilterResult.reason());
+        return client.create(record)
+            .doOnSuccess(created -> log.info("[Orchestrator] Created filtered record: {} category={} reason={}",
+                created.getMetadata().getName(), preFilterResult.category(), preFilterResult.reason()));
     }
 
     private Mono<AiCommentReply> createAiCommentReply(ContextExtractor.CommentContext context, String sentiment,

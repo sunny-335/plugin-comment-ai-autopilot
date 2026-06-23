@@ -5,16 +5,29 @@ plugins {
 
 group 'top.nxxy335.commentaiautopilot.ui'
 
-// Fix Gradle 9.x compatibility with pnpm symlinks
-tasks.named('pnpmInstall') {
-    doNotTrackState("pnpm symlinks are not compatible with Gradle state tracking")
+// Use system pnpm directly — avoids Windows exit code 268435659
+// caused by Gradle Worker Daemon / node-gradle downloading pnpm on Windows
+node {
+    download = false
 }
 
-tasks.register('pnpmBuild', PnpmTask) {
+// Skip built-in pnpm tasks (they fail on Windows), replace with Exec-based tasks
+tasks.named('pnpmSetup').configure { enabled = false }
+tasks.named('pnpmInstall').configure { enabled = false }
+
+tasks.register('uiInstall', Exec) {
+    group = 'build'
+    description = 'Install UI dependencies using system pnpm'
+    workingDir layout.projectDirectory
+    commandLine 'cmd', '/c', 'pnpm', 'install'
+}
+
+tasks.register('uiBuild', Exec) {
     group = 'build'
     description = 'Build the UI project using pnpm'
-    args = ['build']
-    dependsOn tasks.named('pnpmInstall')
+    workingDir layout.projectDirectory
+    commandLine 'cmd', '/c', 'pnpm', 'run', 'build'
+    dependsOn uiInstall
     inputs.dir(layout.projectDirectory.dir('src'))
     inputs.files(fileTree(
         dir: layout.projectDirectory,
@@ -22,17 +35,18 @@ tasks.register('pnpmBuild', PnpmTask) {
     outputs.dir(layout.buildDirectory.dir('dist'))
 }
 
-tasks.register('pnpmCheck', PnpmTask) {
+tasks.register('uiCheck', Exec) {
     group = 'verification'
     description = 'Run unit tests for the UI project using pnpm'
-    args = ['test:unit']
-    dependsOn tasks.named('pnpmInstall')
+    workingDir layout.projectDirectory
+    commandLine 'cmd', '/c', 'pnpm', 'run', 'test:unit'
+    dependsOn uiInstall
 }
 
 tasks.named('check') {
-    dependsOn tasks.named('pnpmCheck')
+    dependsOn tasks.named('uiCheck')
 }
 
 tasks.named('assemble') {
-    dependsOn tasks.named('pnpmBuild')
+    dependsOn tasks.named('uiBuild')
 }

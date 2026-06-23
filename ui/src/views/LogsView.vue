@@ -26,6 +26,7 @@
         <option value="FAIL">失败</option>
         <option value="PENDING">待审核</option>
         <option value="REJECTED">已拒绝</option>
+        <option value="FILTERED">已拦截</option>
       </select>
       <select v-model="filterSentiment" class="filter-select">
         <option value="">全部情感</option>
@@ -64,6 +65,11 @@
                 <span class="card-time">{{ formatDate(reply.metadata.creationTimestamp) }}</span>
               </div>
               <div class="card-text">{{ stripHtml(reply.spec.reply) || '(空)' }}</div>
+              <div v-if="reply.spec.status === 'FILTERED'" class="card-filter-reason">
+                <svg class="filter-icon" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+                <span class="filter-category" v-if="reply.spec.filterCategory">{{ reply.spec.filterCategory }}</span>
+                <span class="filter-detail">{{ reply.spec.filterReason || '未提供具体原因' }}</span>
+              </div>
             </div>
           </div>
           <div class="card-footer">
@@ -176,7 +182,7 @@ const batchApprove = async () => { if(!selectedNames.value.size) return; try { a
 const batchReject = async () => { if(!selectedNames.value.size) return; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-reject", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } }
 const batchDelete = async () => { if(!selectedNames.value.size) return; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-delete", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } }
 
-const getStatusLabel = (s: string) => { const m:any = { PASS: '通过', FAIL: '失败', PENDING: '待审', REJECTED: '拒绝' }; return m[s] || s }
+const getStatusLabel = (s: string) => { const m:any = { PASS: '通过', FAIL: '失败', PENDING: '待审', REJECTED: '拒绝', FILTERED: '已拦截' }; return m[s] || s }
 const getSentimentLabel = (s: string) => { const m:any = { VERY_POSITIVE: '极好', POSITIVE: '正面', NEUTRAL: '中性', NEGATIVE: '负面', VERY_NEGATIVE: '极差' }; return m[s] || s }
 const formatDate = (ts: string) => ts ? new Date(ts).toLocaleString("zh-CN") : ""
 const getPostUrl = (slug: string) => `${window.location.origin}/archives/${slug}`
@@ -236,6 +242,10 @@ onMounted(fetchReplies)
 .tags-wrap { display: flex; gap: 6px; flex-wrap: wrap; }
 .card-time { font-size: 12px; color: #9ca3af; }
 .card-text { font-size: 14px; color: #374151; line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.card-filter-reason { display: flex; align-items: flex-start; gap: 6px; margin-top: 8px; padding: 6px 10px; background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; font-size: 12px; color: #92400e; }
+.filter-icon { width: 14px; height: 14px; flex-shrink: 0; margin-top: 1px; }
+.filter-category { flex-shrink: 0; padding: 1px 6px; background: #b45309; color: #fff; border-radius: 3px; font-weight: 600; font-size: 11px; line-height: 1.5; }
+.filter-detail { flex: 1; line-height: 1.5; }
 .card-footer { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px; background: #f9fafb; border-top: 1px solid #f3f4f6; }
 @media (min-width: 640px) { .card-footer { flex-direction: row; justify-content: space-between; align-items: center; } }
 .footer-info { font-size: 12px; color: #6b7280; display: flex; flex-wrap: wrap; gap: 12px; }
@@ -251,7 +261,7 @@ onMounted(fetchReplies)
 
 /* 标签体系 */
 .custom-tag { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-.tag-PASS { background: #dcfce7; color: #15803d; } .tag-FAIL { background: #fee2e2; color: #b91c1c; } .tag-PENDING { background: #fef9c3; color: #a16207; } .tag-REJECTED { background: #ffedd5; color: #c2410c; }
+.tag-PASS { background: #dcfce7; color: #15803d; } .tag-FAIL { background: #fee2e2; color: #b91c1c; } .tag-PENDING { background: #fef9c3; color: #a16207; } .tag-REJECTED { background: #ffedd5; color: #c2410c; } .tag-FILTERED { background: #f1f5f9; color: #b45309; border: 1px solid #fde68a; }
 .tag-published { background: #dbeafe; color: #1d4ed8; } .tag-draft { background: #f3f4f6; color: #4b5563; }
 .tag-conv { background: #f3e8ff; color: #7e22ce; }
 .tag-VERY_POSITIVE { background: #dcfce7; color: #14532d; } .tag-POSITIVE { background: #ecfdf5; color: #15803d; } .tag-NEGATIVE { background: #ffe4e6; color: #e11d48; } .tag-VERY_NEGATIVE { background: #fee2e2; color: #991b1b; }

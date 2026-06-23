@@ -37,3 +37,15 @@ POST /apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/{replyN
 ```
 
 对指定回复触发对话式AI回复。
+
+### 更新草稿回复内容
+
+```
+PUT /apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/{name}/content
+```
+
+更新草稿状态的AI回复内容。请求体为 JSON 格式：`{"reply": "新的回复内容"}`。仅未发布的草稿回复可编辑。
+
+::: warning
+已发布的回复不可编辑。
+:::

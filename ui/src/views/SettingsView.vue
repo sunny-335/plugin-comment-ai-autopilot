@@ -57,6 +57,14 @@
                 <div class="form-field__header"><span class="form-label">评论者黑名单</span><button class="btn-link" @click="openCommenterDialog">添加评论者</button></div>
                 <textarea v-model="settings.basic.blockedCommenters" rows="2" class="form-textarea" placeholder="例如：张三, spam@example.com"></textarea>
               </div>
+              <div class="form-row">
+                <div class="form-row__label"><span class="form-label">启用前置过滤</span><span class="form-hint">AI回复前检测评论合规性，拦截广告/辱骂/敏感内容，节省Token</span></div>
+                <label class="toggle"><input type="checkbox" v-model="settings.basic.preFilterEnabled" /><span class="toggle__track"><span class="toggle__thumb"></span></span></label>
+              </div>
+              <div class="form-row">
+                <div class="form-row__label"><span class="form-label">违规评论设为待审核</span><span class="form-hint">检测到违规评论时自动取消通过，需人工审核</span></div>
+                <label class="toggle"><input type="checkbox" v-model="settings.basic.preFilterPendingOnViolation" /><span class="toggle__track"><span class="toggle__thumb"></span></span></label>
+              </div>
             </div>
           </div>
 
@@ -244,10 +252,14 @@ const tabItems = [
 ]
 
 const promptVariables = [
-  { name: '{{persona_prompt}}', desc: '角色设定' },
-  { name: '{{comment}}', desc: '评论内容' },
-  { name: '{{article}}', desc: '文章内容' },
-  { name: '{{conversation_history}}', desc: '对话历史' },
+  { name: '{{persona_prompt}}', desc: 'AI角色人格提示词（含已启用的预设）' },
+  { name: '{{safety_prompt}}', desc: '安全规范提示词' },
+  { name: '{{post_title}}', desc: '文章标题' },
+  { name: '{{post_date}}', desc: '文章发布日期' },
+  { name: '{{comment_count}}', desc: '该文章的评论数' },
+  { name: '{{article}}', desc: '文章/页面内容（含标题）' },
+  { name: '{{conversation_history}}', desc: '对话历史上下文' },
+  { name: '{{comment}}', desc: '评论内容（含评论者名称）' },
 ]
 
 const promptPresets = [
@@ -258,7 +270,7 @@ const promptPresets = [
 ]
 
 const settings = reactive({
-  basic: { autoReply: true, autoPublish: true, maxRetryCount: 3, blockedCommenters: "", maxConversationRounds: 8, rateLimitPerMinute: 10 },
+  basic: { autoReply: true, autoPublish: true, maxRetryCount: 3, blockedCommenters: "", maxConversationRounds: 8, rateLimitPerMinute: 10, preFilterEnabled: true, preFilterPendingOnViolation: true },
   model: { modelName: "" },
   prompt: { customPromptTemplate: "", enabledPresets: [] as string[] },
   cleanup: { cleanupEnabled: true, retentionDays: 30 },

@@ -1,6 +1,10 @@
 package top.nxxy335.commentaiautopilot;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Component;
+import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.app.extension.index.IndexSpecs;
 import run.halo.app.extension.Scheme;
@@ -25,13 +29,18 @@ import reactor.core.publisher.Mono;
 @Component
 public class CommentAiAutopilotPlugin extends BasePlugin {
 
+    private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
+
     private final SchemeManager schemeManager;
     private final ReactiveExtensionClient client;
+    private final ObjectMapper objectMapper;
 
-    public CommentAiAutopilotPlugin(PluginContext pluginContext, SchemeManager schemeManager, ReactiveExtensionClient client) {
+    public CommentAiAutopilotPlugin(PluginContext pluginContext, SchemeManager schemeManager,
+                                     ReactiveExtensionClient client, ObjectMapper objectMapper) {
         super(pluginContext);
         this.schemeManager = schemeManager;
         this.client = client;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -54,6 +63,49 @@ public class CommentAiAutopilotPlugin extends BasePlugin {
 
         // 初始化默认AI角色"小回"
         initDefaultPersona();
+
+        // 迁移：确保升级用户的前置过滤配置正确
+        migratePreFilterConfig();
+    }
+
+    /**
+     * 迁移前置过滤配置：从 v1.0.x 升级到 v1.1.0 时，
+     * ConfigMap 中可能保存了旧默认值 preFilterEnabled=false，
+     * 需要将其更新为 true（新默认值）。
+     */
+    private void migratePreFilterConfig() {
+        client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .flatMap(cm -> {
+                var data = cm.getData();
+                if (data == null) return Mono.empty();
+                String basicJson = data.get("basic");
+                if (basicJson == null || basicJson.isBlank()) return Mono.empty();
+                try {
+                    JsonNode node = objectMapper.readTree(basicJson);
+                    if (!node.has("preFilterEnabled")) {
+                        // 字段不存在，添加并设为 true
+                        ((ObjectNode) node).put("preFilterEnabled", true);
+                        data.put("basic", objectMapper.writeValueAsString(node));
+                        return client.update(cm)
+                            .doOnSuccess(c -> log.info("[Migration] Added preFilterEnabled=true to ConfigMap"));
+                    }
+                    if (node.has("preFilterEnabled") && !node.get("preFilterEnabled").asBoolean(true)) {
+                        // 字段存在但为 false（旧默认值），迁移为 true
+                        ((ObjectNode) node).put("preFilterEnabled", true);
+                        data.put("basic", objectMapper.writeValueAsString(node));
+                        return client.update(cm)
+                            .doOnSuccess(c -> log.info("[Migration] Migrated preFilterEnabled from false to true"));
+                    }
+                } catch (Exception e) {
+                    log.warn("[Migration] Failed to migrate preFilter config: {}", e.getMessage());
+                }
+                return Mono.empty();
+            })
+            .subscribe(
+                null,
+                err -> log.debug("[Migration] PreFilter config migration skipped: {}", err.getMessage()),
+                () -> log.debug("[Migration] PreFilter config migration check completed")
+            );
     }
 
     private void initDefaultPersona() {

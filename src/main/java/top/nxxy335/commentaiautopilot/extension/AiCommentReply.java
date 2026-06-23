@@ -65,5 +65,11 @@ public class AiCommentReply extends AbstractExtension {
 
         @Schema(description = "已发布的回复名称")
         private String replyName;
+
+        @Schema(description = "前置过滤拦截分类（广告/辱骂攻击/敏感内容/无意义，为空表示未被拦截）")
+        private String filterCategory;
+
+        @Schema(description = "前置过滤拦截原因详情（为空表示未被拦截）")
+        private String filterReason;
     }
 }

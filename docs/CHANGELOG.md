@@ -1,5 +1,87 @@
 # 更新日志
 
+## v1.1.0
+
+> 2026-06-23
+
+### 新增
+
+- **评论前置过滤（合规检测）** — AI 回复前对评论进行合规性分类，识别广告/辱骂攻击/敏感内容/无意义内容，违规评论停止生成 AI 回复，节省 Token
+- **违规评论自动设为待审核** — 检测到违规评论时自动将原评论 `approved` 置为 `false`，进入待审核队列，前端不再展示该评论
+- **FILTERED 日志状态** — 被拦截的评论生成"已拦截"状态记录，日志页支持按"已拦截"状态筛选
+- **拦截原因分类标签** — 日志页显示拦截分类标签（广告/辱骂攻击/敏感内容/无意义）和详细拦截原因（含评论内容摘要）
+- **安全优先策略** — AI 分类服务不可用或异常时，默认拦截评论而非放行，防止违规内容漏网
+
+### 改进
+
+- **AI Foundation 隔离加载** — 将 AI Foundation API 引用隔离到 `AiFoundationDelegate` 类，`AiFoundationClient` 不再直接引用 AI Foundation 类，修复未安装 AI Foundation 时插件无法启动的问题（`NoClassDefFoundError`）
+- **评论内容 HTML 剥离** — 前置过滤检测前自动剥离评论 HTML 标签，提升 AI 分类准确性
+- **对话场景精准处罚** — AI 对话场景下违规内容来自 Reply 时，仅取消通过该 Reply 而非父级 Comment，避免误伤
+- **升级配置自动迁移** — 从 v1.0.x 升级时自动将 `preFilterEnabled` 从 `false` 迁移为 `true`（新默认值）
+
+### Bug 修复
+
+- **修复未安装 AI Foundation 时插件无法启动** — `BeanDefinitionStoreException: Failed to parse AiFoundationClient`，将 AI Foundation API 引用隔离到委托类
+- **修复前置过滤默认关闭** — `preFilterEnabled` 默认值从 `false` 改为 `true`，新安装和升级用户均默认启用
+- **修复 `penalize()` 遗漏 `approved=null`** — Halo 评论创建时 `approved` 可能为 `null`，原代码仅处理 `approved=true` 的情况
+- **修复 `classify()` 失败时放行违规评论** — `defaultIfEmpty` 和 `onErrorResume` 改为拦截而非放行
+- **修复 Windows 构建失败** — Gradle Worker Daemon 执行 pnpm 退出码 268435659，改用系统 pnpm Exec 任务并禁用 Daemon
+
+---
+
+## v1.0.4
+
+> 2026-06-19
+
+### 改进
+
+- **对话弹窗头像显示** — 对话弹窗中每条消息显示 Gravatar 头像，基于评论者或 AI 角色的邮箱自动匹配
+- **对话引用摘要** — 对话弹窗中回复消息显示引用摘要框，标明引用了谁的什么内容，支持截断显示
+- **UI 全面重构** — LogsView 和 SettingsView 改用纯 Scoped CSS，移除所有 Tailwind 类和自定义 CSS 依赖，避免 Halo 主题冲突
+- **标签去 Emoji 化** — 状态、情感标签改用纯色背景标签，去除所有 Emoji
+- **移动端适配优化** — 全面优化移动端响应式布局，解决排版错位问题
+- **AI角色设置完善** — 支持 CRUD、Gravatar 头像预览、性别/唤醒词/默认角色配置
+- **配置导入导出** — 支持将插件配置（ConfigMap + AI角色）导出为 JSON 文件，方便备份和迁移
+- **评论者黑名单弹窗选择** — 设置页面可从已有评论列表中选择评论者添加到黑名单
+
+### Bug 修复
+
+- **修复对话弹窗引用溯源** — 后端 `getConversation` 重写，构建 Reply 映射字典正确溯源引用关系
+- **修复 ConversationMessage 数据结构** — 新增 `quoteOwner`/`quoteContent` 字段支持引用摘要展示
+- **修复 AI 角色邮箱提取** — 后端新增 `extractOwnerEmail` 方法，正确从 CommentOwner 提取邮箱用于头像生成
+
+---
+
+## v1.0.3
+
+### 改进
+
+- **SettingsView 完整功能版** — 5个设置面板（基本设置、AI角色、模型设置、Prompt、数据清理）全部实现
+- **AI角色管理** — 支持 CRUD、Gravatar 头像、性别/唤醒词/默认角色配置
+- **数据清理** — 自动清理开关、保留天数滑块、手动清理
+- **导入导出** — JSON 配置导入导出
+- **评论者黑名单弹窗选择** — 从已有评论列表中选择评论者
+
+---
+
+## v1.0.2
+
+### 改进
+
+- **LogsView & SettingsView 样式重构** — 移除所有 Tailwind 类，改用 `<style scoped>` 原生 CSS
+- **标签配色、气泡样式、引用框** — 全部使用纯 CSS 实现，避免 Halo 主题冲突
+
+---
+
+## v1.0.1
+
+### 改进
+
+- **版本号升级** — 强制刷新 Halo 前端缓存
+- **历史数据兼容** — LogsView 增加历史 Markdown 引用文本清理正则，防止旧版测试数据套娃显示
+
+---
+
 ## v1.0.0
 
 > 2026-06-18
