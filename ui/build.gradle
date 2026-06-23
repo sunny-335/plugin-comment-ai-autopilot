@@ -15,18 +15,22 @@ node {
 tasks.named('pnpmSetup').configure { enabled = false }
 tasks.named('pnpmInstall').configure { enabled = false }
 
+// Cross-platform: use 'cmd /c' on Windows, direct 'pnpm' on Linux/macOS
+def isWindows = System.properties['os.name'].toLowerCase().contains('windows')
+def pnpmCmd = isWindows ? ['cmd', '/c', 'pnpm'] : ['pnpm']
+
 tasks.register('uiInstall', Exec) {
     group = 'build'
     description = 'Install UI dependencies using system pnpm'
     workingDir layout.projectDirectory
-    commandLine 'cmd', '/c', 'pnpm', 'install'
+    commandLine(pnpmCmd + ['install'])
 }
 
 tasks.register('uiBuild', Exec) {
     group = 'build'
     description = 'Build the UI project using pnpm'
     workingDir layout.projectDirectory
-    commandLine 'cmd', '/c', 'pnpm', 'run', 'build'
+    commandLine(pnpmCmd + ['run', 'build'])
     dependsOn uiInstall
     inputs.dir(layout.projectDirectory.dir('src'))
     inputs.files(fileTree(
@@ -39,7 +43,7 @@ tasks.register('uiCheck', Exec) {
     group = 'verification'
     description = 'Run unit tests for the UI project using pnpm'
     workingDir layout.projectDirectory
-    commandLine 'cmd', '/c', 'pnpm', 'run', 'test:unit'
+    commandLine(pnpmCmd + ['run', 'test:unit'])
     dependsOn uiInstall
 }
 
