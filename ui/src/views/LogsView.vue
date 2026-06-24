@@ -27,6 +27,7 @@
         <option value="PENDING">待审核</option>
         <option value="REJECTED">已拒绝</option>
         <option value="FILTERED">已拦截</option>
+        <option value="FALSE_POSITIVE">误报通过</option>
       </select>
       <select v-model="filterSentiment" class="filter-select">
         <option value="">全部情感</option>
@@ -69,6 +70,13 @@
                 <svg class="filter-icon" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
                 <span class="filter-category" v-if="reply.spec.filterCategory">{{ reply.spec.filterCategory }}</span>
                 <span class="filter-detail">{{ reply.spec.filterReason || '未提供具体原因' }}</span>
+                <button class="btn-false-positive" @click="openFalsePositiveDialog(reply)">误报反馈</button>
+              </div>
+              <div v-if="reply.spec.status === 'FALSE_POSITIVE'" class="card-filter-reason">
+                <svg class="filter-icon fp-icon-ok" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+                <span class="filter-category">误报</span>
+                <span class="filter-detail">{{ reply.spec.filterReason || '用户确认为误报' }}</span>
+                <button class="btn-trigger-ai" @click="handleTriggerAiReply(reply)">触发AI回复</button>
               </div>
             </div>
           </div>
@@ -137,6 +145,33 @@
         </div>
       </div>
     </teleport>
+
+    <!-- 误报反馈确认弹窗 -->
+    <teleport to="body">
+      <div v-if="showFalsePositiveDialog" class="dialog-overlay" @click.self="showFalsePositiveDialog = false">
+        <div class="dialog-box fp-dialog">
+          <div class="dialog-header">
+            <h3>确认为误报？</h3>
+            <button class="close-btn" @click="showFalsePositiveDialog = false"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="24" height="24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>
+          </div>
+          <div class="fp-dialog-body">
+            <p class="fp-desc">系统检测到该评论可能包含违规内容，但您认为这是正常表达。请选择处理方式：</p>
+            <div class="fp-actions">
+              <button class="fp-btn fp-btn-primary" :disabled="fpLoading" @click="handleFalsePositive('aiReply')">
+                <span v-if="fpLoading" class="fp-spinner"></span>
+                AI 回复
+              </button>
+              <button class="fp-btn fp-btn-secondary" :disabled="fpLoading" @click="handleFalsePositive('approveOnly')">
+                仅通过
+              </button>
+              <button class="fp-btn fp-btn-ghost" :disabled="fpLoading" @click="showFalsePositiveDialog = false">
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </teleport>
   </div>
 </template>
 
@@ -149,10 +184,11 @@ import { IconPlug } from "@halo-dev/components"
 interface AiCommentReplyItem { metadata: { name: string; creationTimestamp: string }; spec: any }
 interface ConversationMessage { type: string; owner: string; content: string; time: string; isAi: boolean; quoteOwner?: string; quoteContent?: string }
 
-const replies = ref<AiCommentReplyItem[]>([]); const loading = ref(false); const page = ref(1); const size = ref(20); const total = ref(0); const totalPages = ref(0);
+const replies = ref<AiCommentReplyItem[]>([]); const loading = ref(false); const batchLoading = ref(false); const page = ref(1); const size = ref(20); const total = ref(0); const totalPages = ref(0);
 const selectedNames = ref<Set<string>>(new Set()); const selectAll = ref(false);
 const filterStatus = ref(""); const filterSentiment = ref(""); const filterKeyword = ref("");
 const showDialog = ref(false); const conversationLoading = ref(false); const conversationMessages = ref<ConversationMessage[]>([]);
+const showFalsePositiveDialog = ref(false); const falsePositiveTarget = ref<AiCommentReplyItem | null>(null); const fpLoading = ref(false);
 
 const toggleSelect = (name: string) => { selectedNames.value.has(name) ? selectedNames.value.delete(name) : selectedNames.value.add(name); selectAll.value = replies.value.length > 0 && replies.value.every(r => selectedNames.value.has(r.metadata.name)) }
 const toggleSelectAll = () => { if (selectAll.value) { selectedNames.value.clear(); selectAll.value = false } else { selectedNames.value = new Set(replies.value.map(r => r.metadata.name)); selectAll.value = true } }
@@ -178,11 +214,11 @@ const openConversation = async (reply: AiCommentReplyItem) => {
 const handleDelete = async (name: string) => { try { await axiosInstance.delete(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${name}`); Toast.success("删除成功"); fetchReplies() } catch (e) { Toast.error("删除失败") } }
 const handleApprove = async (name: string) => { try { await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${name}/approve`); Toast.success("审核通过"); fetchReplies() } catch (e) { Toast.error("审核失败") } }
 const handleReject = async (name: string) => { try { await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${name}/reject`); Toast.success("已拒绝"); fetchReplies() } catch (e) { Toast.error("拒绝失败") } }
-const batchApprove = async () => { if(!selectedNames.value.size) return; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-approve", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } }
-const batchReject = async () => { if(!selectedNames.value.size) return; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-reject", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } }
-const batchDelete = async () => { if(!selectedNames.value.size) return; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-delete", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } }
+const batchApprove = async () => { if(!selectedNames.value.size||batchLoading.value) return; batchLoading.value=true; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-approve", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } finally { batchLoading.value=false } }
+const batchReject = async () => { if(!selectedNames.value.size||batchLoading.value) return; batchLoading.value=true; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-reject", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } finally { batchLoading.value=false } }
+const batchDelete = async () => { if(!selectedNames.value.size||batchLoading.value) return; batchLoading.value=true; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-delete", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } finally { batchLoading.value=false } }
 
-const getStatusLabel = (s: string) => { const m:any = { PASS: '通过', FAIL: '失败', PENDING: '待审', REJECTED: '拒绝', FILTERED: '已拦截' }; return m[s] || s }
+const getStatusLabel = (s: string) => { const m:any = { PASS: '通过', FAIL: '失败', PENDING: '待审', REJECTED: '拒绝', FILTERED: '已拦截', FALSE_POSITIVE: '误报通过' }; return m[s] || s }
 const getSentimentLabel = (s: string) => { const m:any = { VERY_POSITIVE: '极好', POSITIVE: '正面', NEUTRAL: '中性', NEGATIVE: '负面', VERY_NEGATIVE: '极差' }; return m[s] || s }
 const formatDate = (ts: string) => ts ? new Date(ts).toLocaleString("zh-CN") : ""
 const getPostUrl = (slug: string) => `${window.location.origin}/archives/${slug}`
@@ -203,6 +239,30 @@ const renderContent = (content: string) => {
 }
 
 const resetFilters = () => { filterStatus.value = ""; filterSentiment.value = ""; filterKeyword.value = ""; page.value = 1; fetchReplies() }
+
+const openFalsePositiveDialog = (reply: AiCommentReplyItem) => { falsePositiveTarget.value = reply; showFalsePositiveDialog.value = true }
+const handleFalsePositive = async (action: string) => {
+  if (!falsePositiveTarget.value) return
+  fpLoading.value = true
+  try {
+    await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${falsePositiveTarget.value.metadata.name}/false-positive`, { action })
+    Toast.success(action === "aiReply" ? "已标记为误报，AI回复正在后台生成" : "已标记为误报并通过")
+    showFalsePositiveDialog.value = false
+    falsePositiveTarget.value = null
+    fetchReplies()
+  } catch (e: any) {
+    Toast.error(e?.response?.data?.message || "操作失败")
+  } finally { fpLoading.value = false }
+}
+const handleTriggerAiReply = async (reply: AiCommentReplyItem) => {
+  try {
+    await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${reply.metadata.name}/false-positive`, { action: "aiReply" })
+    Toast.success("AI回复正在后台生成")
+    fetchReplies()
+  } catch (e: any) {
+    Toast.error(e?.response?.data?.message || "触发失败")
+  }
+}
 watch([filterStatus, filterSentiment, filterKeyword], () => { page.value = 1; fetchReplies() })
 watch(page, () => { selectedNames.value.clear(); selectAll.value = false; fetchReplies() })
 onMounted(fetchReplies)
@@ -246,6 +306,11 @@ onMounted(fetchReplies)
 .filter-icon { width: 14px; height: 14px; flex-shrink: 0; margin-top: 1px; }
 .filter-category { flex-shrink: 0; padding: 1px 6px; background: #b45309; color: #fff; border-radius: 3px; font-weight: 600; font-size: 11px; line-height: 1.5; }
 .filter-detail { flex: 1; line-height: 1.5; }
+.btn-false-positive { flex-shrink: 0; margin-left: auto; padding: 2px 8px; border: 1px solid #b45309; border-radius: 4px; background: transparent; color: #b45309; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all 0.15s; }
+.btn-false-positive:hover { background: #b45309; color: #fff; }
+.fp-icon-ok { color: #16a34a; }
+.btn-trigger-ai { flex-shrink: 0; margin-left: auto; padding: 2px 8px; border: 1px solid #2563eb; border-radius: 4px; background: transparent; color: #2563eb; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all 0.15s; }
+.btn-trigger-ai:hover { background: #2563eb; color: #fff; }
 .card-footer { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px; background: #f9fafb; border-top: 1px solid #f3f4f6; }
 @media (min-width: 640px) { .card-footer { flex-direction: row; justify-content: space-between; align-items: center; } }
 .footer-info { font-size: 12px; color: #6b7280; display: flex; flex-wrap: wrap; gap: 12px; }
@@ -261,7 +326,7 @@ onMounted(fetchReplies)
 
 /* 标签体系 */
 .custom-tag { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-.tag-PASS { background: #dcfce7; color: #15803d; } .tag-FAIL { background: #fee2e2; color: #b91c1c; } .tag-PENDING { background: #fef9c3; color: #a16207; } .tag-REJECTED { background: #ffedd5; color: #c2410c; } .tag-FILTERED { background: #f1f5f9; color: #b45309; border: 1px solid #fde68a; }
+.tag-PASS { background: #dcfce7; color: #15803d; } .tag-FAIL { background: #fee2e2; color: #b91c1c; } .tag-PENDING { background: #fef9c3; color: #a16207; } .tag-REJECTED { background: #ffedd5; color: #c2410c; } .tag-FILTERED { background: #f1f5f9; color: #b45309; border: 1px solid #fde68a; } .tag-FALSE_POSITIVE { background: #dbeafe; color: #1d4ed8; border: 1px solid #93c5fd; }
 .tag-published { background: #dbeafe; color: #1d4ed8; } .tag-draft { background: #f3f4f6; color: #4b5563; }
 .tag-conv { background: #f3e8ff; color: #7e22ce; }
 .tag-VERY_POSITIVE { background: #dcfce7; color: #14532d; } .tag-POSITIVE { background: #ecfdf5; color: #15803d; } .tag-NEGATIVE { background: #ffe4e6; color: #e11d48; } .tag-VERY_NEGATIVE { background: #fee2e2; color: #991b1b; }
@@ -307,4 +372,20 @@ onMounted(fetchReplies)
 .pagination { display: flex; flex-direction: column; gap: 12px; align-items: center; margin-top: 20px; font-size: 14px; color: #6b7280; }
 @media (min-width: 640px) { .pagination { flex-direction: row; justify-content: space-between; } }
 .pagination-btns { display: flex; gap: 8px; }
+
+/* 误报反馈弹窗 */
+.fp-dialog { max-width: 440px; }
+.fp-dialog-body { padding: 24px; }
+.fp-desc { margin: 0 0 20px; font-size: 14px; color: #4b5563; line-height: 1.6; }
+.fp-actions { display: flex; flex-direction: column; gap: 10px; }
+.fp-btn { padding: 10px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.fp-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.fp-btn-primary { background: #2563eb; color: #fff; }
+.fp-btn-primary:hover:not(:disabled) { background: #1d4ed8; }
+.fp-btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+.fp-btn-secondary:hover:not(:disabled) { background: #e5e7eb; }
+.fp-btn-ghost { background: transparent; color: #9ca3af; }
+.fp-btn-ghost:hover:not(:disabled) { color: #6b7280; background: #f9fafb; }
+.fp-spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: fp-spin 0.6s linear infinite; }
+@keyframes fp-spin { to { transform: rotate(360deg); } }
 </style>

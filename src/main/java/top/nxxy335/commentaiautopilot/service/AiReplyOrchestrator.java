@@ -105,7 +105,7 @@ public class AiReplyOrchestrator {
                         }
                         // Wake word triggered: skip page-level annotation check
                         if (wakeWordTriggered) {
-                            return checkBlockedCommenters(commentName)
+                            return filterService.isCommenterBlocked(commentName)
                                 .flatMap(blocked -> {
                                     if (blocked) {
                                         log.info("[Orchestrator] Commenter blocked, skipping wake word: {}", commentName);
@@ -131,6 +131,45 @@ public class AiReplyOrchestrator {
                 log.debug("[Orchestrator] Released processing lock for: {}", lockKey);
             })
             .then();
+    }
+
+    /**
+     * 误报反馈专用：跳过前置过滤和去重检查，直接为已确认误报的评论生成 AI 回复。
+     *
+     * <p>与 {@link #processComment} 不同，此方法：
+     * <ul>
+     *   <li>跳过前置过滤（用户已确认评论合规）</li>
+     *   <li>跳过去重检查（已有 FILTERED 记录，需复用）</li>
+     *   <li>跳过速率限制和黑名单检查（管理员主动操作）</li>
+     * </ul>
+     *
+     * @param commentName     the parent Comment name
+     * @param replyName       the Reply name (null for top-level comments)
+     * @param isAiConversation true when this is a conversation continuation
+     * @param personaName     the persona name to use
+     * @param recordName      the existing AiCommentReply record name to update
+     */
+    public Mono<Void> processFalsePositive(String commentName, String replyName,
+                                            boolean isAiConversation, String personaName,
+                                            String recordName) {
+        log.info("[Orchestrator] Processing false-positive: comment={}, record={}", commentName, recordName);
+
+        return getModelName().flatMap(modelName ->
+            contextExtractor.extract(commentName, replyName, isAiConversation)
+                .flatMap(context -> {
+                    // Fetch the existing record (was FILTERED, now PENDING)
+                    return client.fetch(AiCommentReply.class, recordName)
+                        .flatMap(replyRecord ->
+                            sentimentService.analyzeSentiment(context.commentContent(), modelName)
+                                .flatMap(sentimentResult ->
+                                    promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
+                                        .flatMap(prompt -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
+                                )
+                        );
+                })
+        )
+        .doOnError(e -> log.error("[Orchestrator] Error processing false-positive {}: {}", commentName, e.getMessage(), e))
+        .then();
     }
 
     /**
@@ -169,43 +208,6 @@ public class AiReplyOrchestrator {
                         });
                 })
             );
-    }
-
-    /**
-     * Check if the commenter is in the blocked list.
-     */
-    private Mono<Boolean> checkBlockedCommenters(String commentName) {
-        return client.fetch(run.halo.app.core.extension.content.Comment.class, commentName)
-            .flatMap(comment -> {
-                var owner = comment.getSpec().getOwner();
-                if (owner == null) return Mono.just(false);
-                String displayName = owner.getDisplayName();
-                String email = run.halo.app.core.extension.content.Comment.CommentOwner.KIND_EMAIL.equals(owner.getKind())
-                    ? owner.getName() : "";
-                return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
-                    .mapNotNull(cm -> {
-                        var data = cm.getData();
-                        if (data == null) return false;
-                        String basicJson = data.get("basic");
-                        if (basicJson == null || basicJson.isBlank()) return false;
-                        try {
-                            JsonNode node = objectMapper.readTree(basicJson);
-                            String blockedStr = node.has("blockedCommenters") ? node.get("blockedCommenters").asText("") : "";
-                            if (blockedStr.isBlank()) return false;
-                            for (String item : blockedStr.split(",")) {
-                                String trimmed = item.trim();
-                                if (!trimmed.isEmpty() && (trimmed.equalsIgnoreCase(displayName) || trimmed.equalsIgnoreCase(email))) {
-                                    return true;
-                                }
-                            }
-                            return false;
-                        } catch (Exception e) {
-                            return false;
-                        }
-                    })
-                    .defaultIfEmpty(false);
-            })
-            .defaultIfEmpty(false);
     }
 
     private Mono<Void> doProcess(String commentName, String replyName, boolean isAiConversation,

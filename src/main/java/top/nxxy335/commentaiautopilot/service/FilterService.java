@@ -58,6 +58,19 @@ public class FilterService {
             });
     }
 
+    /**
+     * 检查评论者是否在黑名单中（按 commentName 查询）。
+     */
+    public Mono<Boolean> isCommenterBlocked(String commentName) {
+        return client.fetch(Comment.class, commentName)
+            .flatMap(this::checkBlockedCommenters)
+            .defaultIfEmpty(false)
+            .onErrorResume(e -> {
+                log.warn("[Filter] Error checking blocked commenter: {}", e.getMessage());
+                return Mono.just(false);
+            });
+    }
+
     private Mono<Boolean> checkBlockedCommenters(Comment comment) {
         return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
             .mapNotNull(cm -> {

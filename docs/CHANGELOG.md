@@ -1,5 +1,34 @@
 # 更新日志
 
+## v1.1.3
+
+> 2026-06-25
+
+### 新增
+
+- **误报反馈功能** — 被拦截的评论可进行误报反馈，支持两种处理方式：
+  - **AI 回复**：标记为通过 + 触发 AI 生成回复
+  - **仅通过**：仅标记为通过，不生成回复
+- **误报通过状态** — 新增 `FALSE_POSITIVE` 状态，"仅通过"的记录显示为"误报通过"，不显示"通过/拒绝"按钮
+- **触发 AI 回复按钮** — "误报通过"状态的记录可随时点击"触发AI回复"按钮补生成 AI 回复
+- **上下文优先判断原则** — 前置过滤 AI 提示词重写，遵循五条核心原则：上下文优先、口语化宽容、恶意导向判定、宁放勿杀、闲聊不算无意义
+
+### Bug 修复
+
+- **修复误报反馈"AI 回复"被前置过滤再次拦截** — `processComment()` 始终调用 `preFilterService.check()`，用户已确认为误报的评论会被再次拦截。新增 `processFalsePositive()` 方法跳过前置过滤和去重检查
+- **修复误报反馈"AI 回复"被去重检查拦截** — `hasExistingReply()` 找到已有的 FILTERED→PENDING 记录导致 AI 回复无法生成。`processFalsePositive()` 复用已有记录，不经过去重检查
+- **修复误报反馈"AI 回复"导致全站崩溃** — `processComment()` 同步等待 AI 生成完成，HTTP 请求长时间不返回。改为 `.subscribe()` 异步执行，API 立即返回
+- **修复误报反馈"仅通过"后显示通过/拒绝按钮** — "仅通过"将记录设为 `status=PASS, published=false, reply=""`，导致显示"通过/拒绝"按钮且内容为空。改为 `status=FALSE_POSITIVE`
+- **修复 `extractChoice` 无匹配时返回原始文本** — AI 返回非预期文本时被误判为违规类别。改为返回空字符串触发安全拦截
+- **修复 `approveOriginalComment` 缺少乐观锁重试** — 并发更新 Comment/Reply 时可能静默失败。添加 `Retry.backoff(3, 100ms)` 重试
+
+### 改进
+
+- **消除 `checkBlockedCommenters` 重复代码** — `FilterService` 新增 `isCommenterBlocked(commentName)` 公共方法，`AiReplyOrchestrator` 改为调用它
+- **前端批量操作防重复提交** — 批量通过/拒绝/删除按钮添加 `batchLoading` 状态，操作期间禁用按钮
+
+---
+
 ## v1.1.2
 
 > 2026-06-24
@@ -13,6 +42,17 @@
 
 - **分类调用诊断日志增强** — 在 `AiFoundationDelegate`、`AiFoundationClient`、`CommentPreFilterService` 中增加关键诊断日志（分类开始、fallback 触发、分类结果、异常详情），便于排查分类链路问题
 - **AI 分类空结果处理** — 当 AI 返回空字符串时单独拦截，区别于"服务不可用"场景
+
+---
+
+## v1.1.1
+
+> 2026-06-24
+
+### 改进
+
+- **"无意义"分类范围收窄** — 与文章主题无关的闲聊、灌水、打招呼不再被判为"无意义"，仅纯乱码和无意义字符堆砌（如随机符号、键盘乱敲）才归类为"无意义"
+- **AI 分类降级方案** — 当 `OutputSpec.choice` 结构化输出不被模型支持时，自动退回到普通 chat 调用并从响应文本中提取分类值（`classifyWithChat` fallback）
 
 ---
 

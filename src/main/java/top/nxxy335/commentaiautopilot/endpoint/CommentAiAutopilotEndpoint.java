@@ -101,6 +101,8 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .POST("/import", this::importConfig)
             // 更新草稿回复内容（同时更新 AiCommentReply 和 Reply 扩展）
             .PUT("/replies/{name}/content", this::updateReplyContent)
+            // 误报反馈：将拦截记录标记为误报，可选触发AI回复
+            .POST("/replies/{name}/false-positive", this::falsePositive)
             .build();
     }
 
@@ -1033,6 +1035,128 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                             .flatMap(finalRecord -> ServerResponse.ok().bodyValue(finalRecord));
                     })
                     .switchIfEmpty(ServerResponse.notFound().build());
+            });
+    }
+
+    /**
+     * 误报反馈：将被拦截的评论标记为误报（正常），并可选触发 AI 回复。
+     *
+     * 请求体：{ "action": "aiReply" | "approveOnly" }
+     * - aiReply: 将评论审核状态设为已通过 + 触发 AI 生成回复
+     * - approveOnly: 仅将评论审核状态设为已通过，不触发 AI 回复
+     */
+    private Mono<ServerResponse> falsePositive(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return request.bodyToMono(String.class)
+            .flatMap(body -> {
+                String actionStr;
+                try {
+                    JsonNode node = objectMapper.readTree(body);
+                    actionStr = node.has("action") ? node.get("action").asText("approveOnly") : "approveOnly";
+                } catch (Exception e) {
+                    actionStr = "approveOnly";
+                }
+                final String action = actionStr;
+
+                return client.fetch(AiCommentReply.class, name)
+                    .flatMap(record -> {
+                        if (!"FILTERED".equals(record.getSpec().getStatus())
+                            && !"FALSE_POSITIVE".equals(record.getSpec().getStatus())) {
+                            return ServerResponse.badRequest()
+                                .bodyValue(Map.of("message", "仅已拦截或误报通过状态的记录可进行误报反馈"));
+                        }
+
+                        String commentName = record.getSpec().getCommentId();
+                        String replyName = record.getSpec().getReplyTo();
+
+                        // 1. 将原评论/回复的审核状态设为已通过
+                        Mono<Void> approveMono = approveOriginalComment(commentName, replyName);
+
+                        // 2. 更新 AiCommentReply 记录状态
+                        Mono<Void> updateRecordMono = Mono.defer(() -> client.fetch(AiCommentReply.class, name)
+                            .flatMap(latest -> {
+                                latest.getSpec().setFilterCategory("误报");
+                                latest.getSpec().setFilterReason("用户确认为误报，已通过");
+                                if ("aiReply".equals(action)) {
+                                    latest.getSpec().setStatus("PENDING");
+                                    latest.getSpec().setReply("");
+                                } else {
+                                    // 仅通过：使用 FALSE_POSITIVE 状态，区别于 PASS
+                                    // 避免前端显示"通过/拒绝"按钮和"未发布"标签
+                                    latest.getSpec().setStatus("FALSE_POSITIVE");
+                                    latest.getSpec().setPublished(false);
+                                }
+                                return client.update(latest);
+                            })
+                            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                .filter(e -> e instanceof OptimisticLockingFailureException))
+                            .then());
+
+                        // 3. 异步触发 AI 回复（不阻塞 HTTP 响应）
+                        // 使用 processFalsePositive 跳过前置过滤和去重检查
+                        if ("aiReply".equals(action)) {
+                            boolean isConversation = Boolean.TRUE.equals(record.getSpec().getIsAiConversation());
+                            String recordName = record.getMetadata().getName();
+                            personaResolver.getPersonaNameFromComment(commentName)
+                                .flatMap(personaName ->
+                                    orchestrator.processFalsePositive(commentName, replyName, isConversation, personaName, recordName)
+                                )
+                                .subscribe(
+                                    null,
+                                    err -> log.warn("[FalsePositive] AI reply trigger failed for {}: {}", commentName, err.getMessage()),
+                                    () -> log.info("[FalsePositive] AI reply trigger completed for {}", commentName)
+                                );
+                        }
+
+                        return approveMono
+                            .then(updateRecordMono)
+                            .then(ServerResponse.ok().bodyValue(Map.of(
+                                "message", "aiReply".equals(action) ? "已标记为误报，AI回复正在后台生成" : "已标记为误报并通过"
+                            )));
+                    })
+                    .switchIfEmpty(ServerResponse.notFound().build());
+            });
+    }
+
+    /**
+     * 将被拦截评论的原 Comment 或 Reply 审核状态设为已通过。
+     */
+    private Mono<Void> approveOriginalComment(String commentName, String replyName) {
+        // 优先处理 Reply（AI 对话场景下违规内容来自 Reply）
+        if (replyName != null && !replyName.isBlank()) {
+            return client.fetch(Reply.class, replyName)
+                .flatMap(reply -> {
+                    var spec = reply.getSpec();
+                    if (spec != null && !Boolean.TRUE.equals(spec.getApproved())) {
+                        spec.setApproved(true);
+                        spec.setApprovedTime(Instant.now());
+                        return client.update(reply)
+                            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                .filter(e -> e instanceof OptimisticLockingFailureException))
+                            .doOnSuccess(r -> log.info("[FalsePositive] Reply {} approved", replyName))
+                            .then();
+                    }
+                    return Mono.empty();
+                })
+                .switchIfEmpty(Mono.defer(() -> approveComment(commentName)));
+        }
+        return approveComment(commentName);
+    }
+
+    private Mono<Void> approveComment(String commentName) {
+        return client.fetch(Comment.class, commentName)
+            .flatMap(comment -> {
+                var spec = comment.getSpec();
+                if (spec != null && !Boolean.TRUE.equals(spec.getApproved())) {
+                    spec.setApproved(true);
+                    spec.setApprovedTime(Instant.now());
+                    return client.update(comment)
+                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                            .filter(e -> e instanceof OptimisticLockingFailureException))
+                        .doOnSuccess(c -> log.info("[FalsePositive] Comment {} approved", commentName))
+                        .then();
+                }
+                return Mono.empty();
             });
     }
 }

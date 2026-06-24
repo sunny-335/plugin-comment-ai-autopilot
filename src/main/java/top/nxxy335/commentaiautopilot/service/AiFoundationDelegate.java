@@ -127,6 +127,7 @@ class AiFoundationDelegate {
     /**
      * 从 chat 响应文本中提取匹配的分类值。
      * 优先精确匹配，其次包含匹配。
+     * 无匹配时返回空字符串（触发 defaultIfEmpty 安全拦截），避免原始文本被误判为违规类别。
      */
     static String extractChoice(String text, List<String> choices) {
         if (text == null || text.isBlank()) return "";
@@ -139,9 +140,9 @@ class AiFoundationDelegate {
         for (String choice : choices) {
             if (trimmed.contains(choice)) return choice;
         }
-        // 无匹配，返回原始文本（让调用方处理）
-        log.warn("[Delegate] No matching choice found in response: {}", trimmed);
-        return trimmed;
+        // 无匹配，返回空字符串触发安全拦截
+        log.warn("[Delegate] No matching choice found in response: '{}', returning empty for safety", trimmed);
+        return "";
     }
 
     static Mono<Boolean> isAvailable(ExtensionGetter extensionGetter) {
