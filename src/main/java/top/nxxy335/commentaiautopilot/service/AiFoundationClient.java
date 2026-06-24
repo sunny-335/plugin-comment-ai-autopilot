@@ -70,12 +70,12 @@ public class AiFoundationClient {
             try {
                 return AiFoundationDelegate.classify(extensionGetter, systemPrompt, userPrompt, choices, modelName);
             } catch (NoClassDefFoundError e) {
-                log.debug("AI Foundation API not on classpath: {}", e.getMessage());
+                log.warn("[Client] AI Foundation API not on classpath (classify): {}", e.getMessage());
                 return Mono.empty();
             }
         })
         .onErrorResume(NoClassDefFoundError.class, e -> {
-            log.warn("AI Foundation not available: {}", e.getMessage());
+            log.warn("[Client] AI Foundation NoClassDefFoundError during classify: {}", e.getMessage());
             return Mono.empty();
         });
     }

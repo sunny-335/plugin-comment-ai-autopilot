@@ -1,5 +1,21 @@
 # 更新日志
 
+## v1.1.2
+
+> 2026-06-24
+
+### Bug 修复
+
+- **修复 AI 分类完全不可用** — `classifyWithChoice` 和 `classifyWithChat` 均使用了 `GenerateTextRequest.Builder.system()` 方法，而该方法在当前 AI Foundation 版本中不被支持或导致运行时错误，导致所有评论均被拦截并显示"AI分类服务不可用，安全拦截"。现改为将 system prompt 合并到 user prompt 中，与可用的 `chat()` 方法保持一致的调用方式
+- **修复 `classifyWithChoice` NPE** — `.map()` 返回 `null` 时触发 Reactor 内部 NullPointerException，改为 `.flatMap()` + `Mono.empty()` 正确触发 fallback
+
+### 改进
+
+- **分类调用诊断日志增强** — 在 `AiFoundationDelegate`、`AiFoundationClient`、`CommentPreFilterService` 中增加关键诊断日志（分类开始、fallback 触发、分类结果、异常详情），便于排查分类链路问题
+- **AI 分类空结果处理** — 当 AI 返回空字符串时单独拦截，区别于"服务不可用"场景
+
+---
+
 ## v1.1.0
 
 > 2026-06-23

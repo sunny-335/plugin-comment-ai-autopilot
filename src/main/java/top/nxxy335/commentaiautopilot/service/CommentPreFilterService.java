@@ -44,16 +44,17 @@ public class CommentPreFilterService {
         SPAM, "检测到推广链接、产品推销或引流信息",
         ABUSE, "检测到辱骂、人身攻击、恶意挑衅或歧视性言论",
         SENSITIVE, "检测到政治敏感、违法违规或色情暴力内容",
-        MEANINGLESS, "检测到纯乱码、无意义字符或与文章完全无关的废话"
+        MEANINGLESS, "检测到纯乱码或无意义字符堆砌"
     );
 
     private static final String CLASSIFY_SYSTEM_PROMPT = """
             你是评论内容合规检测员。请判断以下评论属于哪个类别：
-            - 正常：正常的评论、提问、讨论、赞美等
+            - 正常：正常的评论、提问、讨论、赞美、闲聊等，即使与文章主题无关也算正常
             - 广告：包含推广链接、产品推销、引流信息等
             - 辱骂攻击：包含辱骂、人身攻击、恶意挑衅、歧视性言论等
             - 敏感内容：涉及政治敏感、违法违规、色情暴力等
-            - 无意义：纯乱码、无意义字符堆砌、与文章完全无关的废话
+            - 无意义：纯乱码、无意义字符堆砌（如随机符号、键盘乱敲）
+            注意：与文章主题无关的闲聊、灌水、打招呼等属于"正常"，不要误判为"无意义"。
             只返回类别名称，不要返回其他内容。""";
 
     public CommentPreFilterService(ReactiveExtensionClient client,
@@ -85,10 +86,16 @@ public class CommentPreFilterService {
             log.info("[PreFilter] Checking comment (enabled=true): {}", truncated.substring(0, Math.min(50, truncated.length())));
 
             return aiFoundationClient.classify(CLASSIFY_SYSTEM_PROMPT, userPrompt, CLASSIFY_CHOICES, modelName)
+                .doOnNext(result -> log.info("[PreFilter] AI classify returned: '{}'", result))
                 .map(result -> {
                     if (CLEAN.equals(result)) {
                         log.info("[PreFilter] Comment passed: category={}", result);
                         return new PreFilterResult(true, CLEAN, "评论合规");
+                    }
+                    // 空结果视为分类失败
+                    if (result == null || result.isBlank()) {
+                        log.warn("[PreFilter] AI classify returned empty/blank result, blocking for safety");
+                        return new PreFilterResult(false, MEANINGLESS, "AI分类返回空结果，安全拦截");
                     }
                     String desc = CATEGORY_DESCRIPTIONS.getOrDefault(result, "检测到违规内容");
                     String snippet = truncated.substring(0, Math.min(50, truncated.length()));
@@ -99,7 +106,7 @@ public class CommentPreFilterService {
                 // 分类失败时拦截评论（安全优先），而非放行
                 .defaultIfEmpty(new PreFilterResult(false, MEANINGLESS, "AI分类服务不可用，安全拦截"))
                 .onErrorResume(e -> {
-                    log.warn("[PreFilter] Detection error, BLOCKING comment for safety: {}", e.getMessage());
+                    log.warn("[PreFilter] Detection error, BLOCKING comment for safety: {}", e.getMessage(), e);
                     return Mono.just(new PreFilterResult(false, MEANINGLESS, "AI分类服务异常，安全拦截"));
                 });
         });
