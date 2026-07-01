@@ -76,7 +76,10 @@
                 <svg class="filter-icon fp-icon-ok" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
                 <span class="filter-category">误报</span>
                 <span class="filter-detail">{{ reply.spec.filterReason || '用户确认为误报' }}</span>
-                <button class="btn-trigger-ai" @click="handleTriggerAiReply(reply)">触发AI回复</button>
+                <button class="btn-trigger-ai" :disabled="triggerAiLoadingName === reply.metadata.name" @click="handleTriggerAiReply(reply)">
+                  <span v-if="triggerAiLoadingName === reply.metadata.name" class="fp-spinner"></span>
+                  触发AI回复
+                </button>
               </div>
             </div>
           </div>
@@ -176,7 +179,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue"
+import { ref, onMounted, onUnmounted, watch } from "vue"
 import { axiosInstance } from "@halo-dev/api-client"
 import { VPageHeader, VButton, VLoading, Toast } from "@halo-dev/components"
 import { IconPlug } from "@halo-dev/components"
@@ -189,6 +192,7 @@ const selectedNames = ref<Set<string>>(new Set()); const selectAll = ref(false);
 const filterStatus = ref(""); const filterSentiment = ref(""); const filterKeyword = ref("");
 const showDialog = ref(false); const conversationLoading = ref(false); const conversationMessages = ref<ConversationMessage[]>([]);
 const showFalsePositiveDialog = ref(false); const falsePositiveTarget = ref<AiCommentReplyItem | null>(null); const fpLoading = ref(false);
+const triggerAiLoadingName = ref<string | null>(null);
 
 const toggleSelect = (name: string) => { selectedNames.value.has(name) ? selectedNames.value.delete(name) : selectedNames.value.add(name); selectAll.value = replies.value.length > 0 && replies.value.every(r => selectedNames.value.has(r.metadata.name)) }
 const toggleSelectAll = () => { if (selectAll.value) { selectedNames.value.clear(); selectAll.value = false } else { selectedNames.value = new Set(replies.value.map(r => r.metadata.name)); selectAll.value = true } }
@@ -255,17 +259,26 @@ const handleFalsePositive = async (action: string) => {
   } finally { fpLoading.value = false }
 }
 const handleTriggerAiReply = async (reply: AiCommentReplyItem) => {
+  if (triggerAiLoadingName.value) return
+  triggerAiLoadingName.value = reply.metadata.name
   try {
     await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${reply.metadata.name}/false-positive`, { action: "aiReply" })
     Toast.success("AI回复正在后台生成")
     fetchReplies()
   } catch (e: any) {
     Toast.error(e?.response?.data?.message || "触发失败")
-  }
+  } finally { triggerAiLoadingName.value = null }
 }
-watch([filterStatus, filterSentiment, filterKeyword], () => { page.value = 1; fetchReplies() })
+// 状态/情感筛选立即触发；关键词输入防抖 300ms 避免每次按键都请求
+watch([filterStatus, filterSentiment], () => { page.value = 1; fetchReplies() })
+let keywordDebounceTimer: ReturnType<typeof setTimeout> | null = null
+watch(filterKeyword, () => {
+  if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer)
+  keywordDebounceTimer = setTimeout(() => { page.value = 1; fetchReplies() }, 300)
+})
 watch(page, () => { selectedNames.value.clear(); selectAll.value = false; fetchReplies() })
 onMounted(fetchReplies)
+onUnmounted(() => { if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer) })
 </script>
 
 <style scoped>
@@ -309,8 +322,10 @@ onMounted(fetchReplies)
 .btn-false-positive { flex-shrink: 0; margin-left: auto; padding: 2px 8px; border: 1px solid #b45309; border-radius: 4px; background: transparent; color: #b45309; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all 0.15s; }
 .btn-false-positive:hover { background: #b45309; color: #fff; }
 .fp-icon-ok { color: #16a34a; }
-.btn-trigger-ai { flex-shrink: 0; margin-left: auto; padding: 2px 8px; border: 1px solid #2563eb; border-radius: 4px; background: transparent; color: #2563eb; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all 0.15s; }
-.btn-trigger-ai:hover { background: #2563eb; color: #fff; }
+.btn-trigger-ai { flex-shrink: 0; margin-left: auto; padding: 2px 8px; border: 1px solid #2563eb; border-radius: 4px; background: transparent; color: #2563eb; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all 0.15s; display: inline-flex; align-items: center; gap: 4px; }
+.btn-trigger-ai:hover:not(:disabled) { background: #2563eb; color: #fff; }
+.btn-trigger-ai:disabled { opacity: 0.6; cursor: not-allowed; }
+.btn-trigger-ai .fp-spinner { width: 11px; height: 11px; border-color: rgba(37,99,235,0.3); border-top-color: #2563eb; }
 .card-footer { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px; background: #f9fafb; border-top: 1px solid #f3f4f6; }
 @media (min-width: 640px) { .card-footer { flex-direction: row; justify-content: space-between; align-items: center; } }
 .footer-info { font-size: 12px; color: #6b7280; display: flex; flex-wrap: wrap; gap: 12px; }
@@ -329,7 +344,7 @@ onMounted(fetchReplies)
 .tag-PASS { background: #dcfce7; color: #15803d; } .tag-FAIL { background: #fee2e2; color: #b91c1c; } .tag-PENDING { background: #fef9c3; color: #a16207; } .tag-REJECTED { background: #ffedd5; color: #c2410c; } .tag-FILTERED { background: #f1f5f9; color: #b45309; border: 1px solid #fde68a; } .tag-FALSE_POSITIVE { background: #dbeafe; color: #1d4ed8; border: 1px solid #93c5fd; }
 .tag-published { background: #dbeafe; color: #1d4ed8; } .tag-draft { background: #f3f4f6; color: #4b5563; }
 .tag-conv { background: #f3e8ff; color: #7e22ce; }
-.tag-VERY_POSITIVE { background: #dcfce7; color: #14532d; } .tag-POSITIVE { background: #ecfdf5; color: #15803d; } .tag-NEGATIVE { background: #ffe4e6; color: #e11d48; } .tag-VERY_NEGATIVE { background: #fee2e2; color: #991b1b; }
+.tag-VERY_POSITIVE { background: #dcfce7; color: #14532d; } .tag-POSITIVE { background: #ecfdf5; color: #15803d; } .tag-NEUTRAL { background: #f3f4f6; color: #4b5563; } .tag-NEGATIVE { background: #ffe4e6; color: #e11d48; } .tag-VERY_NEGATIVE { background: #fee2e2; color: #991b1b; }
 
 /* 对话弹窗与响应式气泡 */
 .dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 9999; backdrop-filter: blur(2px); padding: 16px; box-sizing: border-box; }

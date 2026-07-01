@@ -1060,10 +1060,13 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
 
                 return client.fetch(AiCommentReply.class, name)
                     .flatMap(record -> {
-                        if (!"FILTERED".equals(record.getSpec().getStatus())
-                            && !"FALSE_POSITIVE".equals(record.getSpec().getStatus())) {
+                        String currentStatus = record.getSpec().getStatus();
+                        // 允许：FILTERED（拦截误报）、FALSE_POSITIVE（已通过但可触发AI）、FAIL（AI生成失败可重试）
+                        if (!"FILTERED".equals(currentStatus)
+                            && !"FALSE_POSITIVE".equals(currentStatus)
+                            && !"FAIL".equals(currentStatus)) {
                             return ServerResponse.badRequest()
-                                .bodyValue(Map.of("message", "仅已拦截或误报通过状态的记录可进行误报反馈"));
+                                .bodyValue(Map.of("message", "仅已拦截、误报通过或AI生成失败的记录可进行此操作"));
                         }
 
                         String commentName = record.getSpec().getCommentId();
@@ -1092,24 +1095,26 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                                 .filter(e -> e instanceof OptimisticLockingFailureException))
                             .then());
 
-                        // 3. 异步触发 AI 回复（不阻塞 HTTP 响应）
+                        // 3. 异步触发 AI 回复（在记录更新完成后，不阻塞 HTTP 响应）
                         // 使用 processFalsePositive 跳过前置过滤和去重检查
-                        if ("aiReply".equals(action)) {
-                            boolean isConversation = Boolean.TRUE.equals(record.getSpec().getIsAiConversation());
-                            String recordName = record.getMetadata().getName();
-                            personaResolver.getPersonaNameFromComment(commentName)
-                                .flatMap(personaName ->
-                                    orchestrator.processFalsePositive(commentName, replyName, isConversation, personaName, recordName)
-                                )
-                                .subscribe(
-                                    null,
-                                    err -> log.warn("[FalsePositive] AI reply trigger failed for {}: {}", commentName, err.getMessage()),
-                                    () -> log.info("[FalsePositive] AI reply trigger completed for {}", commentName)
-                                );
-                        }
+                        final boolean isConversation = Boolean.TRUE.equals(record.getSpec().getIsAiConversation());
+                        final String recordName = record.getMetadata().getName();
 
                         return approveMono
                             .then(updateRecordMono)
+                            .doOnSuccess(v -> {
+                                if ("aiReply".equals(action)) {
+                                    personaResolver.getPersonaNameFromComment(commentName)
+                                        .flatMap(personaName ->
+                                            orchestrator.processFalsePositive(commentName, replyName, isConversation, personaName, recordName)
+                                        )
+                                        .subscribe(
+                                            null,
+                                            err -> log.warn("[FalsePositive] AI reply trigger failed for {}: {}", commentName, err.getMessage()),
+                                            () -> log.info("[FalsePositive] AI reply trigger completed for {}", commentName)
+                                        );
+                                }
+                            })
                             .then(ServerResponse.ok().bodyValue(Map.of(
                                 "message", "aiReply".equals(action) ? "已标记为误报，AI回复正在后台生成" : "已标记为误报并通过"
                             )));

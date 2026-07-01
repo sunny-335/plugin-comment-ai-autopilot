@@ -341,7 +341,7 @@ public class AiReplyOrchestrator {
                 // Update retryCount and reset status to PENDING
                 return updateRecordForRetry(replyRecord, newRetryCount)
                     .delayElement(Duration.ofSeconds(delaySeconds))
-                    .then(retryGenerate(context, replyRecord, modelName, personaName));
+                    .flatMap(updated -> retryGenerate(context, updated, modelName, personaName));
             } else {
                 log.warn("[Orchestrator] Max retry count ({}) exceeded for: {}, marking as FAIL. Reason: {}",
                     maxRetry, context.commentId(), reason);

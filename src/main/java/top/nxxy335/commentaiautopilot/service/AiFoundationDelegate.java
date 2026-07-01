@@ -127,6 +127,8 @@ class AiFoundationDelegate {
     /**
      * 从 chat 响应文本中提取匹配的分类值。
      * 优先精确匹配，其次包含匹配。
+     * 包含匹配时优先匹配违规类别（广告/辱骂/敏感/无意义），最后才匹配"正常"，
+     * 避免 AI 解释性文本中同时出现"正常"和违规词时误判为"正常"。
      * 无匹配时返回空字符串（触发 defaultIfEmpty 安全拦截），避免原始文本被误判为违规类别。
      */
     static String extractChoice(String text, List<String> choices) {
@@ -136,9 +138,15 @@ class AiFoundationDelegate {
         for (String choice : choices) {
             if (trimmed.equals(choice)) return choice;
         }
-        // 包含匹配（响应可能包含额外文字，如"该评论属于：广告"）
+        // 包含匹配：先匹配违规类别，最后匹配"正常"
+        // 避免"该评论属于广告，不是正常评论"被误匹配为"正常"
         for (String choice : choices) {
+            if ("正常".equals(choice)) continue;
             if (trimmed.contains(choice)) return choice;
+        }
+        // 最后检查"正常"
+        for (String choice : choices) {
+            if ("正常".equals(choice) && trimmed.contains(choice)) return choice;
         }
         // 无匹配，返回空字符串触发安全拦截
         log.warn("[Delegate] No matching choice found in response: '{}', returning empty for safety", trimmed);

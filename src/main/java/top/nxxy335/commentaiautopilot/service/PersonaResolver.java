@@ -9,7 +9,10 @@ import run.halo.app.core.extension.content.Post;
 import run.halo.app.core.extension.content.Tag;
 import run.halo.app.extension.ExtensionClient;
 import run.halo.app.extension.ReactiveExtensionClient;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+
+import java.util.List;
 
 /**
  * Shared service for resolving AI persona name from a comment's associated
@@ -57,64 +60,80 @@ public class PersonaResolver {
                         return Mono.just(persona);
                     }
                 }
-                // 2. Category annotations
+                // 2. Category annotations (check sequentially, return first match)
                 var spec = post.getSpec();
-                if (spec != null && spec.getCategories() != null) {
-                    for (String categoryName : spec.getCategories()) {
-                        var persona = resolveFromCategory(categoryName);
-                        if (persona != null) return Mono.just(persona);
-                    }
-                }
-                // 3. Tag annotations
-                if (spec != null && spec.getTags() != null) {
-                    for (String tagName : spec.getTags()) {
-                        var persona = resolveFromTag(tagName);
-                        if (persona != null) return Mono.just(persona);
-                    }
-                }
-                return Mono.just("");
+                List<String> categories = (spec != null && spec.getCategories() != null)
+                    ? spec.getCategories() : List.of();
+                // 3. Tag annotations (fallback if no category match)
+                List<String> tags = (spec != null && spec.getTags() != null)
+                    ? spec.getTags() : List.of();
+
+                return resolveFromCategories(categories)
+                    .switchIfEmpty(resolveFromTags(tags));
             })
             .defaultIfEmpty("");
     }
 
-    private String resolveFromCategory(String categoryName) {
-        // Use block() here because this is called from a Reconciler (sync context)
-        // For reactive context, the caller should use the reactive version
-        try {
-            return reactiveClient.fetch(Category.class, categoryName)
-                .mapNotNull(cat -> {
-                    var catAnnotations = cat.getMetadata().getAnnotations();
-                    if (catAnnotations != null) {
-                        String catPersona = catAnnotations.get(AI_PERSONA_ANNOTATION);
-                        if (catPersona != null && !catPersona.isBlank()) {
-                            return catPersona;
-                        }
-                    }
-                    return null;
-                })
-                .block();
-        } catch (Exception e) {
-            return null;
+    /**
+     * Sequentially check category annotations, returning the first non-empty persona.
+     * Uses concatMap to preserve order and short-circuit on first match.
+     */
+    private Mono<String> resolveFromCategories(List<String> categoryNames) {
+        if (categoryNames == null || categoryNames.isEmpty()) {
+            return Mono.empty();
         }
+        return Flux.fromIterable(categoryNames)
+            .concatMap(this::resolveFromCategory)
+            .next();
     }
 
-    private String resolveFromTag(String tagName) {
-        try {
-            return reactiveClient.fetch(Tag.class, tagName)
-                .mapNotNull(tag -> {
-                    var tagAnnotations = tag.getMetadata().getAnnotations();
-                    if (tagAnnotations != null) {
-                        String tagPersona = tagAnnotations.get(AI_PERSONA_ANNOTATION);
-                        if (tagPersona != null && !tagPersona.isBlank()) {
-                            return tagPersona;
-                        }
-                    }
-                    return null;
-                })
-                .block();
-        } catch (Exception e) {
-            return null;
+    /**
+     * Sequentially check tag annotations, returning the first non-empty persona.
+     * Uses concatMap to preserve order and short-circuit on first match.
+     */
+    private Mono<String> resolveFromTags(List<String> tagNames) {
+        if (tagNames == null || tagNames.isEmpty()) {
+            return Mono.empty();
         }
+        return Flux.fromIterable(tagNames)
+            .concatMap(this::resolveFromTag)
+            .next();
+    }
+
+    private Mono<String> resolveFromCategory(String categoryName) {
+        return reactiveClient.fetch(Category.class, categoryName)
+            .mapNotNull(cat -> {
+                var catAnnotations = cat.getMetadata().getAnnotations();
+                if (catAnnotations != null) {
+                    String catPersona = catAnnotations.get(AI_PERSONA_ANNOTATION);
+                    if (catPersona != null && !catPersona.isBlank()) {
+                        return catPersona;
+                    }
+                }
+                return null;
+            })
+            .onErrorResume(e -> {
+                log.warn("Failed to resolve persona from category {}: {}", categoryName, e.getMessage());
+                return Mono.empty();
+            });
+    }
+
+    private Mono<String> resolveFromTag(String tagName) {
+        return reactiveClient.fetch(Tag.class, tagName)
+            .mapNotNull(tag -> {
+                var tagAnnotations = tag.getMetadata().getAnnotations();
+                if (tagAnnotations != null) {
+                    String tagPersona = tagAnnotations.get(AI_PERSONA_ANNOTATION);
+                    if (tagPersona != null && !tagPersona.isBlank()) {
+                        return tagPersona;
+                    }
+                }
+                return null;
+            })
+            .onErrorResume(e -> {
+                log.warn("Failed to resolve persona from tag {}: {}", tagName, e.getMessage());
+                return Mono.empty();
+            });
     }
 
     /**

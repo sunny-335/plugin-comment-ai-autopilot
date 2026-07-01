@@ -309,7 +309,7 @@ const filteredCommenters = computed(() => { const kw = commenterSearch.value.tri
 const openCommenterDialog = async () => { showCommenterDialog.value = true; commenterLoading.value = true; try { const { data } = await axiosInstance.get(`${apiBase}/commenters`); commenterList.value = data.items || data } catch(e) { commenterList.value = [] } finally { commenterLoading.value = false } }
 const addCommenter = (c: any) => { const v = c.email || c.displayName; const cur = settings.basic.blockedCommenters.split(",").map(s=>s.trim()).filter(Boolean); if(cur.includes(v)) return; cur.push(v); settings.basic.blockedCommenters = cur.join(","); Toast.success("已添加"); showCommenterDialog.value = false }
 const cleanupLoading = ref(false); const cleanupResult = ref<number | null>(null)
-const performCleanup = async () => { cleanupLoading.value=true; try { const { data } = await axiosInstance.post(`${apiBase}/cleanup`); cleanupResult.value = data.deletedCount ?? data ?? 0; Toast.success("清理完成") } catch(e){ Toast.error("清理失败") } finally { cleanupLoading.value=false } }
+const performCleanup = async () => { cleanupLoading.value=true; try { const { data } = await axiosInstance.post(`${apiBase}/cleanup`); cleanupResult.value = typeof data === 'number' ? data : (data?.deletedCount ?? 0); Toast.success("清理完成") } catch(e){ Toast.error("清理失败") } finally { cleanupLoading.value=false } }
 
 // Persona
 const personasApiBase = `${apiBase}/personas`

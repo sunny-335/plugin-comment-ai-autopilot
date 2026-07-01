@@ -5,13 +5,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.jsoup.Jsoup;
 import org.jsoup.safety.Safelist;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 import run.halo.app.core.extension.content.Comment;
 import run.halo.app.core.extension.content.Reply;
 import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.ReactiveExtensionClient;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -178,14 +181,17 @@ public class CommentPreFilterService {
                     spec.setApproved(false);
                     spec.setApprovedTime(null);
                     return client.update(comment)
-                        .doOnSuccess(c -> log.info("[PreFilter] Comment {} set to pending for violation", commentName))
-                        .onErrorResume(e -> {
-                            log.warn("[PreFilter] Failed to penalize comment {}: {}", commentName, e.getMessage());
-                            return Mono.empty();
-                        });
+                        .doOnSuccess(c -> log.info("[PreFilter] Comment {} set to pending for violation", commentName));
                 }
                 log.debug("[PreFilter] Comment {} already unapproved, skip penalize", commentName);
                 return Mono.<Comment>empty();
+            })
+            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                .filter(OptimisticLockingFailureException.class::isInstance)
+                .doBeforeRetry(sig -> log.debug("[PreFilter] Retrying penalizeComment {} (attempt {})", commentName, sig.totalRetries() + 1)))
+            .onErrorResume(e -> {
+                log.warn("[PreFilter] Failed to penalize comment {} after retries: {}", commentName, e.getMessage());
+                return Mono.empty();
             })
             .then();
     }
@@ -201,14 +207,17 @@ public class CommentPreFilterService {
                     spec.setApproved(false);
                     spec.setApprovedTime(null);
                     return client.update(reply)
-                        .doOnSuccess(r -> log.info("[PreFilter] Reply {} set to pending for violation", replyName))
-                        .onErrorResume(e -> {
-                            log.warn("[PreFilter] Failed to penalize reply {}: {}", replyName, e.getMessage());
-                            return Mono.empty();
-                        });
+                        .doOnSuccess(r -> log.info("[PreFilter] Reply {} set to pending for violation", replyName));
                 }
                 log.debug("[PreFilter] Reply {} already unapproved, skip penalize", replyName);
                 return Mono.<Reply>empty();
+            })
+            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                .filter(OptimisticLockingFailureException.class::isInstance)
+                .doBeforeRetry(sig -> log.debug("[PreFilter] Retrying penalizeReply {} (attempt {})", replyName, sig.totalRetries() + 1)))
+            .onErrorResume(e -> {
+                log.warn("[PreFilter] Failed to penalize reply {} after retries: {}", replyName, e.getMessage());
+                return Mono.empty();
             })
             .then();
     }

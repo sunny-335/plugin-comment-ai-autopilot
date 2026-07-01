@@ -1,5 +1,28 @@
 # 更新日志
 
+## v1.2.1
+
+> 2026-07-01
+
+### Bug 修复
+
+- **修复 `AiReplyOrchestrator.retryOrFail` 重试计数失效** — `.then()` 丢弃了更新后的记录导致 `retryCount` 始终为 0，AI 生成失败时陷入无限重试。改为 `.flatMap()` 传递更新后的记录
+- **修复误报反馈"AI 回复"被空字符串覆盖** — `.subscribe()` 在异步流程中过早触发，导致 AI 回复生成完成后被空字符串覆盖。改为在 `.doOnSuccess()` 中触发异步生成
+- **修复 `PersonaResolver` 在响应式上下文中使用 `.block()`** — 调用阻塞方法会阻塞 Reactor 线程。改为返回 `Mono<String>` 并使用 `Flux.concatMap().next()` 替代 for 循环
+- **修复 `penalizeComment`/`penalizeReply` 缺少乐观锁重试** — 并发更新 Comment/Reply 时可能静默失败。添加 `Retry.backoff(3, 100ms)` 重试
+- **修复 `approveOriginalComment` 缺少乐观锁重试** — 同上，添加 `Retry.backoff(3, 100ms)` 重试
+- **修复误报反馈端点无法重试 `FAIL` 状态记录** — 仅接受 `FILTERED` 和 `FALSE_POSITIVE` 状态，AI 生成失败的记录无法重试。现接受 `FAIL` 状态
+- **修复 `tag-NEUTRAL` 缺少 CSS 样式** — 中性情感标签无样式显示。补充样式定义
+- **修复 `handleTriggerAiReply` 缺少加载保护** — 触发 AI 回复按钮可被重复点击导致重复提交。添加 loading 状态
+- **修复 `filterKeyword` 输入未做防抖** — 每次按键都触发搜索，性能开销大。添加 300ms 防抖
+- **修复 `performCleanup` 逻辑错误** — 清理逻辑存在判断错误
+
+### 改进
+
+- **优化 `extractChoice` 分类匹配优先级** — 优先匹配违规类别（advertising/abuse/sensitive/meaningless），再匹配 `normal`，避免正常评论被误判为违规类别
+
+---
+
 ## v1.2.0
 
 > 2026-06-25
