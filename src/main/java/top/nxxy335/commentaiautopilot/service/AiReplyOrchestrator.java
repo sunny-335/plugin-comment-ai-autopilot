@@ -154,11 +154,12 @@ public class AiReplyOrchestrator {
                                             String recordName) {
         log.info("[Orchestrator] Processing false-positive: comment={}, record={}", commentName, recordName);
 
-        // 加锁防止重复触发（与 processComment 使用相同的锁机制）
+        // 加锁防止重复触发（与 processComment 使用相同的锁机制，存储获取时间便于 cleanupStaleLocks 清理）
         String lockKey = "fp:" + recordName;
-        long lockExpiry = System.currentTimeMillis() + LOCK_EXPIRY_MS;
-        Long existingExpiry = processingLocks.putIfAbsent(lockKey, lockExpiry);
-        if (existingExpiry != null && existingExpiry > System.currentTimeMillis()) {
+        cleanupStaleLocks();
+        long now = System.currentTimeMillis();
+        Long existingAcquireTime = processingLocks.putIfAbsent(lockKey, now);
+        if (existingAcquireTime != null && (now - existingAcquireTime) < LOCK_EXPIRY_MS) {
             log.warn("[Orchestrator] False-positive already in progress for record {}, skipping", recordName);
             return Mono.empty();
         }

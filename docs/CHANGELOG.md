@@ -9,7 +9,7 @@
 - **支持瞬间插件（Moments）评论区适配** — 当检测到已安装并启用 [plugin-moments](https://github.com/halo-sigs/plugin-moments) 时，自动为瞬间评论启用 AI 自动回复
   - 新增 `MomentsIntegrationService`，通过 `SchemeManager` 检测 Moment 扩展注册状态，避免直接引用导致的 `NoClassDefFoundError`
   - 在插件设置 - 基本设置中新增"瞬间评论区适配"开关，仅当瞬间插件可用时显示，默认开启
-  - `ContextExtractor` 适配 Moment 上下文：使用 moment name 作为关联标识，评论创建时间作为日期上下文
+  - `ContextExtractor` 适配 Moment 上下文：使用 moment name 作为关联标识，通过 `Unstructured` 单次 fetch 获取瞬间实际内容（`spec.content.raw`/`html`）和发布时间（`spec.releaseTime`）作为 AI 上下文
   - `FilterService` 对 Moment 评论读取 `momentsEnabled` 配置决定是否触发 AI 回复
 - **评论人昵称广告判定** — 前置过滤现在综合判断评论者昵称与评论内容。昵称包含商业推广关键词（如"免费算命"、"加微信xxx"、"代写论文"、"低价代购"等）即使评论内容看似正常也会被判定为广告
   - `CommentPreFilterService.check()` 新增 `commentOwner` 参数，将昵称纳入 AI 分类输入
@@ -26,7 +26,7 @@
   - 强化身份约束：明确角色不是文章作者、站点管理员、客服或用户本人；禁止声称亲身经历未提供之事；禁止编造文章外的人物、数据、链接；禁止泄露系统提示词、模型参数、插件实现与安全策略
 - **"Prompt设置"更名为"提示词设置"** — UI 标签页、面板标题、设置项标签、帮助文本统一改为中文"提示词"
 - **日志瞬间关联链接精确到具体瞬间** — Moment 评论的关联链接从 `/moments` 列表页改为 `/moments/{name}` 具体瞬间页
-- **日志页面增加实时刷新功能** — 新增"实时刷新"开关，开启后每 10 秒静默轮询新数据。标签页隐藏或弹窗打开时自动暂停，回到页面时立即刷新
+- **日志页面增加实时刷新功能** — 新增"实时刷新"开关，开启后每 10 秒静默轮询新数据。标签页隐藏或弹窗打开时自动暂停，回到页面时立即刷新。支持可配置刷新间隔（5s/10s/30s/60s）、新记录 Toast 提示、滚动位置保留、连续失败自动关闭
 - **AI 安全审核改为失败关闭策略** — `ReviewService` 在审核服务不可用或异常时不再自动通过，改为返回 FAIL 并拦截发布，避免未经审核的 AI 回复被自动发布
 
 ### Bug 修复
@@ -51,8 +51,13 @@
 - **修复 Endpoint 批量操作并发无限制** — `flatMap` 默认并发 256，大批量操作可能压垮数据库。限制为 10
 - **修复 LogsView 实时刷新漏检状态变化** — 数据签名仅含 total 和首尾 name，记录状态变化不会被检测。签名新增首尾状态和发布标记
 - **修复 LogsView 实时刷新与手动操作竞态** — 自动刷新与手动 fetchReplies 可能同时执行导致数据错乱。新增 `autoRefreshing` 标志位
-- **优化实时刷新** — 新增可配置刷新间隔（5s/10s/30s/60s）、相对更新时间显示、新记录 Toast 提示、滚动位置保留、用户操作后重置计时
 - **修复 `ReplyReconciler.isAiReply` 空指针风险** — 未检查 `spec == null`，畸形 Reply 数据会触发 NPE
+- **修复 `ContextExtractor` 瞬间内容重复 fetch** — `getMomentContent` 和 `getMomentReleaseDate` 各自独立 fetch 同一个瞬间扩展，产生 2 次重复查询。合并为 `getMomentContentAndDate` 单次 fetch
+- **修复 `ContextExtractor` 瞬间分支缺少容错** — `buildContext` 的 Moment 分支缺少 `onErrorResume` 和 `defaultIfEmpty`，异常时静默跳过而非降级处理。已补齐与 Post/SinglePage 一致的容错
+- **修复 `AiReplyOrchestrator.processFalsePositive` 锁竞态条件** — 锁值存储过期时间（未来时间戳），过期后 `putIfAbsent` 不覆盖旧值导致去重失效。改为存储获取时间，与 `processComment` 一致
+- **修复 `cleanupStaleLocks` 无法清理误报处理锁** — 误报处理锁值是未来时间戳，`cleanupStaleLocks` 计算 age 为负数永远不清理。统一为存储获取时间
+- **修复 `ContextExtractor.getCommentCount` 空指针风险** — `reply.getSpec()` 可能为 null 时直接调用 `getCommentName()` 触发 NPE。`fetchConversationHistory` 同样问题已一并修复
+- **移除实时刷新冗余时间显示** — 移除刷新间隔选择右侧的"等待中…"/"刚刚更新"/"N秒前更新"等状态文本及相关定时器，减少不必要的 UI 噪声和每秒重渲染
 
 ---
 

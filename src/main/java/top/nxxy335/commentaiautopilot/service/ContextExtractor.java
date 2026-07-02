@@ -12,7 +12,13 @@ import run.halo.app.core.extension.content.Comment;
 import run.halo.app.core.extension.content.Post;
 import run.halo.app.core.extension.content.SinglePage;
 import run.halo.app.core.extension.content.Reply;
+import run.halo.app.extension.GroupVersionKind;
 import run.halo.app.extension.ReactiveExtensionClient;
+import run.halo.app.extension.Unstructured;
+
+import java.time.Instant;
+import java.util.Map;
+import java.util.Optional;
 
 @Component
 @Slf4j
@@ -56,7 +62,8 @@ public class ContextExtractor {
                 var triggerTime = triggerReply.getMetadata().getCreationTimestamp();
                 return client.list(Reply.class,
                         reply -> {
-                            if (!commentName.equals(reply.getSpec().getCommentName())) {
+                            var spec = reply.getSpec();
+                            if (spec == null || !commentName.equals(spec.getCommentName())) {
                                 return false;
                             }
                             if (triggerReplyName.equals(reply.getMetadata().getName())) {
@@ -185,9 +192,32 @@ public class ContextExtractor {
 
         if (subjectRef != null && "Moment".equals(subjectRef.getKind())) {
             // 瞬间插件评论：Moment 没有 slug/title，用 moment name 作为关联标识
+            // 通过 Unstructured 单次 fetch 获取瞬间实际内容和发布时间作为 AI 上下文
             String momentName = subjectRef.getName();
-            return getCommentCount(comment.getMetadata().getName())
-                .map(commentCount -> new CommentContext(
+            String commentDate = formatCommentDate(comment);
+            return getMomentContentAndDate(momentName, commentDate)
+                .flatMap(parts -> getCommentCount(comment.getMetadata().getName())
+                    .map(commentCount -> new CommentContext(
+                        comment.getMetadata().getName(),
+                        momentName,
+                        momentName,
+                        commentContent,
+                        commentOwner,
+                        "瞬间",
+                        parts[0],
+                        null,
+                        isAiConversation,
+                        parts[1],
+                        commentCount,
+                        "",
+                        "Moment"
+                    ))
+                )
+                .onErrorResume(e -> {
+                    log.warn("[ContextExtractor] Failed to process Moment {}: {}", momentName, e.getMessage());
+                    return Mono.empty();
+                })
+                .defaultIfEmpty(new CommentContext(
                     comment.getMetadata().getName(),
                     momentName,
                     momentName,
@@ -197,8 +227,8 @@ public class ContextExtractor {
                     "",
                     null,
                     isAiConversation,
-                    formatCommentDate(comment),
-                    commentCount,
+                    commentDate,
+                    0,
                     "",
                     "Moment"
                 ));
@@ -325,24 +355,31 @@ public class ContextExtractor {
 
         if (subjectRef != null && "Moment".equals(subjectRef.getKind())) {
             String momentName = subjectRef.getName();
-            return getCommentCount(commentName)
-                .flatMap(commentCount -> historyMono
-                    .map(history -> new CommentContext(
-                        commentName,
-                        momentName,
-                        momentName,
-                        replyContent,
-                        replyOwner,
-                        "瞬间",
-                        "",
-                        replyName,
-                        isAiConversation,
-                        formatCommentDate(comment),
-                        commentCount,
-                        history,
-                        "Moment"
-                    ))
+            String commentDate = formatCommentDate(comment);
+            return getMomentContentAndDate(momentName, commentDate)
+                .flatMap(parts -> getCommentCount(commentName)
+                    .flatMap(commentCount -> historyMono
+                        .map(history -> new CommentContext(
+                            commentName,
+                            momentName,
+                            momentName,
+                            replyContent,
+                            replyOwner,
+                            "瞬间",
+                            parts[0],
+                            replyName,
+                            isAiConversation,
+                            parts[1],
+                            commentCount,
+                            history,
+                            "Moment"
+                        ))
+                    )
                 )
+                .onErrorResume(e -> {
+                    log.warn("[ContextExtractor] Failed to process Moment {} for reply: {}", momentName, e.getMessage());
+                    return Mono.empty();
+                })
                 .defaultIfEmpty(new CommentContext(
                     commentName,
                     momentName,
@@ -353,7 +390,7 @@ public class ContextExtractor {
                     "",
                     replyName,
                     isAiConversation,
-                    "",
+                    commentDate,
                     0,
                     "",
                     "Moment"
@@ -460,6 +497,55 @@ public class ContextExtractor {
             .defaultIfEmpty("");
     }
 
+    /**
+     * 瞬间插件(Moments)内容与发布时间获取（单次 fetch）。
+     *
+     * <p>瞬间插件是可选依赖，不能直接引用其 Java 类（会导致 NoClassDefFoundError）。
+     * 通过 ReactiveExtensionClient.fetch(GroupVersionKind, name) 以 Unstructured 形式获取瞬间扩展，
+     * 再从 spec.content.raw / spec.content.html 提取实际内容，从 spec.releaseTime 提取发布时间。
+     * 返回 String[2]：[0]=内容，[1]=发布日期。
+     */
+    private Mono<String[]> getMomentContentAndDate(String momentName, String fallbackDate) {
+        GroupVersionKind momentGvk = new GroupVersionKind(
+            "moment.halo.run", "v1alpha1", "Moment");
+        return client.fetch(momentGvk, momentName)
+            .mapNotNull(moment -> new String[]{
+                extractMomentContent(moment.getData()),
+                extractMomentReleaseDate(moment.getData(), fallbackDate)
+            })
+            .defaultIfEmpty(new String[]{"", fallbackDate != null ? fallbackDate : ""})
+            .onErrorResume(e -> {
+                log.warn("[ContextExtractor] Failed to fetch Moment {}: {}", momentName, e.getMessage());
+                return Mono.just(new String[]{"", fallbackDate != null ? fallbackDate : ""});
+            });
+    }
+
+    /** 从 Unstructured data 中提取瞬间内容：优先 raw，回退 html（去标签）。 */
+    private String extractMomentContent(Map<String, Object> data) {
+        Optional<Object> rawOpt = Unstructured.getNestedValue(data, "spec", "content", "raw");
+        if (rawOpt.isPresent() && rawOpt.get() != null) {
+            String raw = rawOpt.get().toString();
+            if (!raw.isBlank()) return raw;
+        }
+        Optional<Object> htmlOpt = Unstructured.getNestedValue(data, "spec", "content", "html");
+        if (htmlOpt.isPresent() && htmlOpt.get() != null) {
+            String html = htmlOpt.get().toString();
+            if (html != null && !html.isBlank()) {
+                return Jsoup.clean(html, Safelist.none());
+            }
+        }
+        return "";
+    }
+
+    /** 从 Unstructured data 中提取瞬间发布日期：spec.releaseTime，回退到 fallbackDate。 */
+    private String extractMomentReleaseDate(Map<String, Object> data, String fallbackDate) {
+        Optional<Instant> releaseTime = Unstructured.getNestedInstant(data, "spec", "releaseTime");
+        if (releaseTime.isPresent() && releaseTime.get() != null) {
+            return releaseTime.get().toString().substring(0, 10);
+        }
+        return fallbackDate != null ? fallbackDate : "";
+    }
+
     private String formatPostDate(Post post) {
         var publishTime = post.getSpec().getPublishTime();
         if (publishTime != null) {
@@ -497,7 +583,10 @@ public class ContextExtractor {
 
     private Mono<Integer> getCommentCount(String commentName) {
         return client.list(Reply.class,
-                reply -> commentName.equals(reply.getSpec().getCommentName()),
+                reply -> {
+                    var spec = reply.getSpec();
+                    return spec != null && commentName.equals(spec.getCommentName());
+                },
                 null)
             .collectList()
             .map(replies -> replies.size())

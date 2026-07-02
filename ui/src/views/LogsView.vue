@@ -42,7 +42,7 @@
       <div class="autorefresh-group">
         <button class="btn-autorefresh" :class="{ 'is-active': autoRefresh }" @click="toggleAutoRefresh" :title="autoRefresh ? '点击关闭实时刷新' : '点击开启实时刷新'">
           <span class="autorefresh-dot" v-if="autoRefresh"></span>
-          {{ autoRefresh ? '实时刷新' : '实时刷新' }}
+          实时刷新
         </button>
         <select v-if="autoRefresh" v-model="autoRefreshSecs" class="autorefresh-interval" :title="`刷新间隔：${autoRefreshSecs}秒`">
           <option :value="5">5s</option>
@@ -50,7 +50,6 @@
           <option :value="30">30s</option>
           <option :value="60">60s</option>
         </select>
-        <span v-if="autoRefresh" class="autorefresh-status">{{ lastRefreshLabel }}</span>
       </div>
     </div>
 
@@ -208,11 +207,9 @@ const showFalsePositiveDialog = ref(false); const falsePositiveTarget = ref<AiCo
 const triggerAiLoadingName = ref<string | null>(null);
 
 // 实时刷新：定时轮询新数据。暂停条件：标签页隐藏、loading 中、弹窗打开。
-// 优化：轻量变更检测、新记录提示、连续失败自动关闭、间隔可配置、用户操作后重置计时、保留滚动位置、显示相对更新时间
+// 优化：轻量变更检测、新记录提示、连续失败自动关闭、间隔可配置、用户操作后重置计时、保留滚动位置
 const autoRefresh = ref(false); const autoRefreshSecs = ref(10); let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let consecutiveFailures = 0; const MAX_FAILURES = 5;
-const lastRefreshTime = ref<number | null>(null); let refreshRelativeTimer: ReturnType<typeof setInterval> | null = null;
-const lastRefreshLabel = ref("等待中…");
 let autoRefreshing = false; // 防止 autoRefreshTick 与 fetchReplies 竞态
 // 轻量签名：total + 首尾 name + 首尾状态，检测记录数量、顺序、状态变化
 const dataSignature = (items: any[], totalCount: number) => {
@@ -222,13 +219,6 @@ const dataSignature = (items: any[], totalCount: number) => {
   const firstPublished = first.spec?.published || "";
   const lastPublished = last.spec?.published || "";
   return `${totalCount}|${first.metadata.name}|${firstStatus}|${firstPublished}|${last.metadata.name}|${lastStatus}|${lastPublished}`;
-};
-const updateRelativeTime = () => {
-  if (lastRefreshTime.value == null) { lastRefreshLabel.value = "等待中…"; return; }
-  const diff = Math.floor((Date.now() - lastRefreshTime.value) / 1000);
-  if (diff < 5) lastRefreshLabel.value = "刚刚更新";
-  else if (diff < 60) lastRefreshLabel.value = `${diff}秒前更新`;
-  else lastRefreshLabel.value = `${Math.floor(diff / 60)}分钟前更新`;
 };
 const isPageVisible = () => !document.hidden;
 const autoRefreshTick = async () => {
@@ -248,8 +238,6 @@ const autoRefreshTick = async () => {
     const newItems = data.items || []; const newTotal = data.total || 0;
     const newSignature = dataSignature(newItems, newTotal);
     consecutiveFailures = 0; // 成功，重置失败计数
-    lastRefreshTime.value = Date.now();
-    updateRelativeTime();
     // 仅当数据签名变化时更新，减少不必要的渲染
     if (newSignature !== prevSignature) {
       // 在首页且有新增记录时提示用户（仅在首页轮询能可靠判定"新增"）
@@ -276,16 +264,10 @@ const autoRefreshTick = async () => {
 const startAutoRefresh = () => {
   if (autoRefreshTimer) clearInterval(autoRefreshTimer);
   consecutiveFailures = 0;
-  lastRefreshTime.value = null;
-  updateRelativeTime();
-  // 相对时间计时器：每秒更新 "N秒前更新" 文案
-  if (refreshRelativeTimer) clearInterval(refreshRelativeTimer);
-  refreshRelativeTimer = setInterval(updateRelativeTime, 1000);
   autoRefreshTimer = setInterval(() => { if (isPageVisible()) autoRefreshTick(); }, autoRefreshSecs.value * 1000);
 };
 const stopAutoRefresh = () => {
   if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
-  if (refreshRelativeTimer) { clearInterval(refreshRelativeTimer); refreshRelativeTimer = null; }
 };
 const resetAutoRefreshTimer = () => { if (autoRefresh.value) startAutoRefresh(); };
 const toggleAutoRefresh = () => {
@@ -435,7 +417,6 @@ onUnmounted(() => {
 @keyframes autorefresh-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.85); } }
 .autorefresh-interval { padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb; font-size: 13px; color: #6b7280; cursor: pointer; }
 .autorefresh-interval:focus { outline: none; border-color: #86efac; }
-.autorefresh-status { font-size: 12px; color: #9ca3af; white-space: nowrap; min-width: 70px; }
 
 /* 列表区 */
 .list-area { margin: 16px; }
