@@ -69,6 +69,10 @@ public class ReviewService {
      *   <li>Rating 2 → 50 (PASS, borderline)</li>
      *   <li>Rating 1 → 30 (PASS, but low quality)</li>
      * </ul>
+     *
+     * <p><b>失败关闭策略</b>：当审核服务不可用、AI 基础设施未安装或审核异常时，
+     * 默认返回 FAIL（score=0），避免未经审核的内容被自动发布。这是安全优先的取舍：
+     * 宁可漏发一条回复，也不让未审核内容直接放出。
      */
     public Mono<ReviewResult> review(String articleContent, String commentContent, String aiReply,
                                       String modelName) {
@@ -97,10 +101,11 @@ public class ReviewService {
                 // Stage 2: Quality rating (only for safe content)
                 return rateQuality(commentContent, aiReply, modelName);
             })
-            .defaultIfEmpty(new ReviewResult(100, "PASS", "审核无响应，自动通过"))
+            // 失败关闭：审核无响应时标记为 FAIL，避免未审核内容被自动发布
+            .defaultIfEmpty(new ReviewResult(0, "FAIL", "审核服务无响应，已安全拦截"))
             .onErrorResume(e -> {
-                log.warn("[Review] Review failed, auto-passing: {}", e.getMessage());
-                return Mono.just(new ReviewResult(100, "PASS", "审核服务异常，自动通过"));
+                log.warn("[Review] Review failed, blocking reply for safety: {}", e.getMessage());
+                return Mono.just(new ReviewResult(0, "FAIL", "审核服务异常，已安全拦截"));
             });
     }
 

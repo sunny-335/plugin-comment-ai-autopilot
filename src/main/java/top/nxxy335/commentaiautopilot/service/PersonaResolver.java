@@ -41,6 +41,7 @@ public class PersonaResolver {
             .flatMap(comment -> {
                 var subjectRef = comment.getSpec().getSubjectRef();
                 if (subjectRef == null || !"Post".equals(subjectRef.getKind())) {
+                    // Moment / SinglePage 等不支持角色标注，使用默认角色
                     return Mono.just("");
                 }
                 String postName = subjectRef.getName();

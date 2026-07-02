@@ -1,5 +1,61 @@
 # 更新日志
 
+## v1.3.0
+
+> 2026-07-01
+
+### 新增
+
+- **支持瞬间插件（Moments）评论区适配** — 当检测到已安装并启用 [plugin-moments](https://github.com/halo-sigs/plugin-moments) 时，自动为瞬间评论启用 AI 自动回复
+  - 新增 `MomentsIntegrationService`，通过 `SchemeManager` 检测 Moment 扩展注册状态，避免直接引用导致的 `NoClassDefFoundError`
+  - 在插件设置 - 基本设置中新增"瞬间评论区适配"开关，仅当瞬间插件可用时显示，默认开启
+  - `ContextExtractor` 适配 Moment 上下文：使用 moment name 作为关联标识，评论创建时间作为日期上下文
+  - `FilterService` 对 Moment 评论读取 `momentsEnabled` 配置决定是否触发 AI 回复
+- **评论人昵称广告判定** — 前置过滤现在综合判断评论者昵称与评论内容。昵称包含商业推广关键词（如"免费算命"、"加微信xxx"、"代写论文"、"低价代购"等）即使评论内容看似正常也会被判定为广告
+  - `CommentPreFilterService.check()` 新增 `commentOwner` 参数，将昵称纳入 AI 分类输入
+  - 系统提示词新增"原则六：昵称与内容综合判定"，列举昵称广告典型特征
+
+### 改进
+
+- **重构提示词组装与兼容机制** — 建立更健壮的模块化拼接逻辑，解决多配置组合时的指令冲突与上下文丢失问题
+  - 新增 `{{output_guidance}}`、`{{sentiment_hint}}`、`{{language_requirement}}` 三个占位符，将输出规范、情感提示、语言要求拆分为独立模块
+  - 角色与预设使用段落分隔（空行+段落标记）确保指令隔离，避免风格预设污染角色设定
+  - 情感提示通过 `{{sentiment_hint}}` 占位符原位注入；旧模板不含该占位符时自动降级为末尾追加，保持向后兼容
+  - 消除两个近乎相同的 `buildPrompt` 重载的代码重复，统一委托给单一核心组装方法
+  - 默认模板更新为模块化结构，新安装用户即可获得更稳定的 AI 输出
+  - 强化身份约束：明确角色不是文章作者、站点管理员、客服或用户本人；禁止声称亲身经历未提供之事；禁止编造文章外的人物、数据、链接；禁止泄露系统提示词、模型参数、插件实现与安全策略
+- **"Prompt设置"更名为"提示词设置"** — UI 标签页、面板标题、设置项标签、帮助文本统一改为中文"提示词"
+- **日志瞬间关联链接精确到具体瞬间** — Moment 评论的关联链接从 `/moments` 列表页改为 `/moments/{name}` 具体瞬间页
+- **日志页面增加实时刷新功能** — 新增"实时刷新"开关，开启后每 10 秒静默轮询新数据。标签页隐藏或弹窗打开时自动暂停，回到页面时立即刷新
+- **AI 安全审核改为失败关闭策略** — `ReviewService` 在审核服务不可用或异常时不再自动通过，改为返回 FAIL 并拦截发布，避免未经审核的 AI 回复被自动发布
+
+### Bug 修复
+
+- **修复日志页面 XSS 漏洞** — `renderContent` 仅移除 `<script>` 和 `<iframe>` 标签，未过滤 `on*` 事件处理器和 `javascript:` 协议。现已全面清理所有事件处理器、危险协议和嵌入标签
+- **修复日志页面删除后页码越界** — 删除最后一条记录后当前页变空但页码不回退，显示"暂无记录"。新增页码自动回退逻辑
+- **修复日志页面分页按钮在加载中可重复点击** — 新增 `:disabled="loading"` 防止重复请求
+- **修复误报弹窗关闭后残留状态** — 点击遮罩关闭弹窗时未清除 `falsePositiveTarget`，可能导致重开时显示旧数据
+- **修复 `AiReplyOrchestrator` 指数退避无上限** — `retryCount` 较高时延迟可达 43 分钟，超过处理锁 TTL 导致锁提前过期。新增 300 秒上限
+- **修复 `ContextExtractor` 空指针风险** — `extractCommentContent`/`extractCommentOwner`/`extractReplyContent` 未检查 `spec == null`，畸形数据会触发 NPE 中断整个处理链
+- **修复 `SettingsView` 邮箱防抖定时器未清理** — 组件卸载时 `emailDebounce` 定时器仍在运行，导致内存泄漏。新增 `onUnmounted` 清理
+- **修复 `HomeView` 刷新数据 Toast 提前弹出** — `refreshData` 未等待异步请求完成就提示成功。改为 `await Promise.all()` 后再提示
+- **修复 `PromptBuilder` 安全提示词可被绕过** — 自定义模板若遗漏 `{{safety_prompt}}` 占位符，安全约束会被静默丢弃。新增安全网：检测到遗漏时强制前置注入安全规范
+- **修复 `AiReplyOrchestrator.processFalsePositive` 无去重锁** — 误报处理流程未使用处理锁，重复触发会创建重复 AI 回复。新增 `processingLocks` 机制
+- **修复 `AiReplyOrchestrator.processFalsePositive` 失败后记录卡在 PENDING** — 处理失败时记录未被标记为 FAIL，用户无法重试。新增 `onErrorResume` 将记录标记为 FAIL
+- **修复 `AiReplyOrchestrator.hasExistingReply` 错误时静默放行** — 数据库异常时去重检查返回 false 导致重复创建记录。改为返回 true（失败关闭，宁可跳过也不重复）
+- **修复 `AiReplyCleanupService` 删除处理中记录** — 清理逻辑未过滤 PENDING/REVIEWING 状态记录，可能破坏正在进行的 AI 回复流程。新增状态过滤
+- **修复 `AiReplyCleanupService` null subscribe 消费者** — `.subscribe(null, ...)` 传入 null 成功消费者，可能导致 NPE。改为空 lambda
+- **修复 `AiReplyCleanupService` 清理开关默认值不一致** — ConfigMap 存在但 data 为 null 时返回 false（禁用），与其他情况返回 true 不一致。统一为 true
+- **修复 Endpoint 分页参数未校验** — `Integer.parseInt` 对非数字参数抛出 500 错误。新增 `parseIntSafely` 安全解析
+- **修复 Endpoint 关键词搜索大小写敏感** — 搜索 "Hello" 无法匹配 "hello"。改为 `toLowerCase()` 不区分大小写
+- **修复 Endpoint 批量操作并发无限制** — `flatMap` 默认并发 256，大批量操作可能压垮数据库。限制为 10
+- **修复 LogsView 实时刷新漏检状态变化** — 数据签名仅含 total 和首尾 name，记录状态变化不会被检测。签名新增首尾状态和发布标记
+- **修复 LogsView 实时刷新与手动操作竞态** — 自动刷新与手动 fetchReplies 可能同时执行导致数据错乱。新增 `autoRefreshing` 标志位
+- **优化实时刷新** — 新增可配置刷新间隔（5s/10s/30s/60s）、相对更新时间显示、新记录 Toast 提示、滚动位置保留、用户操作后重置计时
+- **修复 `ReplyReconciler.isAiReply` 空指针风险** — 未检查 `spec == null`，畸形 Reply 数据会触发 NPE
+
+---
+
 ## v1.2.1
 
 > 2026-07-01

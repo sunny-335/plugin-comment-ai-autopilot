@@ -183,6 +183,27 @@ public class ContextExtractor {
                 ));
         }
 
+        if (subjectRef != null && "Moment".equals(subjectRef.getKind())) {
+            // 瞬间插件评论：Moment 没有 slug/title，用 moment name 作为关联标识
+            String momentName = subjectRef.getName();
+            return getCommentCount(comment.getMetadata().getName())
+                .map(commentCount -> new CommentContext(
+                    comment.getMetadata().getName(),
+                    momentName,
+                    momentName,
+                    commentContent,
+                    commentOwner,
+                    "瞬间",
+                    "",
+                    null,
+                    isAiConversation,
+                    formatCommentDate(comment),
+                    commentCount,
+                    "",
+                    "Moment"
+                ));
+        }
+
         return Mono.just(new CommentContext(
             comment.getMetadata().getName(),
             "",
@@ -302,6 +323,43 @@ public class ContextExtractor {
                 ));
         }
 
+        if (subjectRef != null && "Moment".equals(subjectRef.getKind())) {
+            String momentName = subjectRef.getName();
+            return getCommentCount(commentName)
+                .flatMap(commentCount -> historyMono
+                    .map(history -> new CommentContext(
+                        commentName,
+                        momentName,
+                        momentName,
+                        replyContent,
+                        replyOwner,
+                        "瞬间",
+                        "",
+                        replyName,
+                        isAiConversation,
+                        formatCommentDate(comment),
+                        commentCount,
+                        history,
+                        "Moment"
+                    ))
+                )
+                .defaultIfEmpty(new CommentContext(
+                    commentName,
+                    momentName,
+                    momentName,
+                    replyContent,
+                    replyOwner,
+                    "瞬间",
+                    "",
+                    replyName,
+                    isAiConversation,
+                    "",
+                    0,
+                    "",
+                    "Moment"
+                ));
+        }
+
         return historyMono
             .map(history -> new CommentContext(
                 commentName,
@@ -322,6 +380,7 @@ public class ContextExtractor {
 
     private String extractCommentContent(Comment comment) {
         var spec = comment.getSpec();
+        if (spec == null) return "";
         // Prefer raw content (plain text / markdown), fall back to rendered HTML
         String raw = spec.getRaw();
         if (raw != null && !raw.isBlank()) {
@@ -335,7 +394,9 @@ public class ContextExtractor {
     }
 
     private String extractCommentOwner(Comment comment) {
-        var owner = comment.getSpec().getOwner();
+        var spec = comment.getSpec();
+        if (spec == null) return "匿名用户";
+        var owner = spec.getOwner();
         if (owner != null) {
             String displayName = owner.getDisplayName();
             if (displayName != null && !displayName.isBlank()) {
@@ -347,6 +408,7 @@ public class ContextExtractor {
 
     private String extractReplyContent(Reply reply) {
         var spec = reply.getSpec();
+        if (spec == null) return "";
         String raw = spec.getRaw();
         if (raw != null && !raw.isBlank()) {
             return raw;
@@ -416,6 +478,17 @@ public class ContextExtractor {
             return publishTime.toString().substring(0, 10);
         }
         var creationTimestamp = singlePage.getMetadata().getCreationTimestamp();
+        if (creationTimestamp != null) {
+            return creationTimestamp.toString().substring(0, 10);
+        }
+        return "";
+    }
+
+    /**
+     * 瞬间没有 publishTime，使用评论的创建时间作为日期上下文。
+     */
+    private String formatCommentDate(Comment comment) {
+        var creationTimestamp = comment.getMetadata().getCreationTimestamp();
         if (creationTimestamp != null) {
             return creationTimestamp.toString().substring(0, 10);
         }

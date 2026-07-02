@@ -16,6 +16,9 @@ spec:
     # Optional dependency: plugin still loads without AI Foundation,
     # but AI features require it to be installed and enabled.
     ai-foundation?: "*"
+    # Optional dependency: when Moments plugin is installed and enabled,
+    # AI auto-reply can be enabled for moments comments.
+    plugin-moments?: "*"
   author:
     name: 暖心向阳335
     website: https://nxxy335.top
@@ -30,4 +33,4 @@ spec:
       url: "https://github.com/sunny-335/plugin-comment-ai-autopilot/blob/main/LICENSE"
   settingName: "comment-ai-autopilot-settings"
   configMapName: "comment-ai-autopilot-configmap"
-  version: "1.2.1"
+  version: "1.3.0"

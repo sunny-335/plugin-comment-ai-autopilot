@@ -24,6 +24,7 @@ import top.nxxy335.commentaiautopilot.service.AiFoundationClient;
 import top.nxxy335.commentaiautopilot.service.AiReplyCleanupService;
 import top.nxxy335.commentaiautopilot.service.AiReplyOrchestrator;
 import top.nxxy335.commentaiautopilot.service.CommentReplyPublisher;
+import top.nxxy335.commentaiautopilot.service.MomentsIntegrationService;
 import top.nxxy335.commentaiautopilot.service.PersonaResolver;
 import top.nxxy335.commentaiautopilot.util.GravatarUtil;
 
@@ -59,10 +60,11 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     private final CommentReplyPublisher commentReplyPublisher;
     private final ObjectMapper objectMapper;
     private final PersonaResolver personaResolver;
+    private final MomentsIntegrationService momentsIntegrationService;
 
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, AiFoundationClient aiFoundationClient, CommentReplyPublisher commentReplyPublisher, ObjectMapper objectMapper, PersonaResolver personaResolver) {
+    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, AiFoundationClient aiFoundationClient, CommentReplyPublisher commentReplyPublisher, ObjectMapper objectMapper, PersonaResolver personaResolver, MomentsIntegrationService momentsIntegrationService) {
         this.client = client;
         this.orchestrator = orchestrator;
         this.cleanupService = cleanupService;
@@ -70,6 +72,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         this.commentReplyPublisher = commentReplyPublisher;
         this.objectMapper = objectMapper;
         this.personaResolver = personaResolver;
+        this.momentsIntegrationService = momentsIntegrationService;
     }
 
     @Override
@@ -103,6 +106,8 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .PUT("/replies/{name}/content", this::updateReplyContent)
             // 误报反馈：将拦截记录标记为误报，可选触发AI回复
             .POST("/replies/{name}/false-positive", this::falsePositive)
+            // 查询瞬间插件可用性
+            .GET("/moments-status", this::momentsStatus)
             .build();
     }
 
@@ -112,11 +117,11 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     }
 
     private Mono<ServerResponse> listReplies(ServerRequest request) {
-        var page = Integer.parseInt(request.queryParam("page").orElse("1"));
-        var size = Integer.parseInt(request.queryParam("size").orElse("20"));
+        int page = parseIntSafely(request.queryParam("page").orElse("1"), 1);
+        int size = parseIntSafely(request.queryParam("size").orElse("20"), 20);
         var statusFilter = request.queryParam("status").orElse("");
         var sentimentFilter = request.queryParam("sentiment").orElse("");
-        var keywordFilter = request.queryParam("keyword").orElse("");
+        var keywordFilter = request.queryParam("keyword").orElse("").toLowerCase();
         var startDateStr = request.queryParam("startDate").orElse("");
         var endDateStr = request.queryParam("endDate").orElse("");
         var sortOrder = request.queryParam("sortOrder").orElse("desc");
@@ -161,7 +166,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                         .filter(r -> {
                             if (!keywordFilter.isBlank()) {
                                 String reply = r.getSpec().getReply();
-                                if (reply == null || !reply.contains(keywordFilter)) return false;
+                                if (reply == null || !reply.toLowerCase().contains(keywordFilter)) return false;
                             }
                             if (finalStartInstant != null || finalEndInstant != null) {
                                 Instant creationTs = r.getMetadata().getCreationTimestamp();
@@ -554,7 +559,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                                 return Mono.just(false);
                             })
                             .defaultIfEmpty(false)
-                    )
+                    , 10)
                     .collectList()
                     .flatMap(results -> {
                         long successCount = results.stream().filter(b -> b).count();
@@ -608,7 +613,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                                 return Mono.just(false);
                             })
                             .defaultIfEmpty(false)
-                    )
+                    , 10)
                     .collectList()
                     .flatMap(results -> {
                         long successCount = results.stream().filter(b -> b).count();
@@ -642,7 +647,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                                 return Mono.just(false);
                             })
                             .defaultIfEmpty(false)
-                    )
+                    , 10)
                     .collectList()
                     .flatMap(results -> {
                         long successCount = results.stream().filter(b -> b).count();
@@ -1163,5 +1168,25 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                 }
                 return Mono.empty();
             });
+    }
+
+    /**
+     * 查询瞬间插件是否已安装并启用。
+     * 前端通过此接口判断是否显示"瞬间评论区适配"开关。
+     */
+    private Mono<ServerResponse> momentsStatus(ServerRequest request) {
+        boolean available = momentsIntegrationService.isMomentsAvailable();
+        return ServerResponse.ok().bodyValue(Map.of(
+            "installed", available,
+            "enabled", available
+        ));
+    }
+
+    private int parseIntSafely(String value, int defaultValue) {
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 }

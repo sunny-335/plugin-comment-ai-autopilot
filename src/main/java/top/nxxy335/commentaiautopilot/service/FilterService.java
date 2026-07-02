@@ -119,8 +119,41 @@ public class FilterService {
                 .defaultIfEmpty(false);
         }
 
+        // 瞬间插件评论：读取 momentsEnabled 配置（默认开启）
+        if ("Moment".equals(kind)) {
+            return getMomentsEnabled();
+        }
+
         // Unknown subjectRef type, default to allowing
         return Mono.just(true);
+    }
+
+    /**
+     * 读取瞬间评论区适配开关配置。
+     */
+    private Mono<Boolean> getMomentsEnabled() {
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return true;
+                String basicJson = data.get("basic");
+                if (basicJson == null || basicJson.isBlank()) return true;
+                try {
+                    JsonNode node = objectMapper.readTree(basicJson);
+                    if (!node.has("momentsEnabled")) {
+                        return true;
+                    }
+                    return node.get("momentsEnabled").asBoolean(true);
+                } catch (Exception e) {
+                    log.warn("[Filter] Failed to parse momentsEnabled: {}", e.getMessage());
+                    return true;
+                }
+            })
+            .onErrorResume(e -> {
+                log.debug("[Filter] Failed to fetch momentsEnabled: {}", e.getMessage());
+                return Mono.just(true);
+            })
+            .defaultIfEmpty(true);
     }
 
     private boolean resolveAnnotation(java.util.Map<String, String> annotations, boolean defaultEnabled) {

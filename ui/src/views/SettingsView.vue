@@ -65,6 +65,10 @@
                 <div class="form-row__label"><span class="form-label">违规评论设为待审核</span><span class="form-hint">检测到违规评论时自动取消通过，需人工审核</span></div>
                 <label class="toggle"><input type="checkbox" v-model="settings.basic.preFilterPendingOnViolation" /><span class="toggle__track"><span class="toggle__thumb"></span></span></label>
               </div>
+              <div v-if="momentsAvailable" class="form-row">
+                <div class="form-row__label"><span class="form-label">瞬间评论区适配</span><span class="form-hint">为瞬间插件(Moments)的评论区启用AI自动回复</span></div>
+                <label class="toggle"><input type="checkbox" v-model="settings.basic.momentsEnabled" /><span class="toggle__track"><span class="toggle__thumb"></span></span></label>
+              </div>
             </div>
           </div>
 
@@ -118,14 +122,14 @@
             </div>
           </div>
 
-          <!-- 4. Prompt设置 -->
+          <!-- 4. 提示词设置 -->
           <div v-if="activeTab === 'prompt'" class="setting-panel">
             <div class="panel-header section-header--amber">
-              <div class="section-header__text"><h3>Prompt设置</h3><p>自定义AI回复的提示词模板</p></div>
+              <div class="section-header__text"><h3>提示词设置</h3><p>自定义AI回复的提示词模板</p></div>
             </div>
             <div class="panel-body">
               <div class="form-field">
-                <label class="form-label">Prompt预设</label>
+                <label class="form-label">提示词预设</label>
                 <div class="preset-grid">
                   <label v-for="p in promptPresets" :key="p.key" class="preset-item" :class="{ 'preset-item--active': isPresetEnabled(p.key) }">
                     <input type="checkbox" :checked="isPresetEnabled(p.key)" @change="togglePreset(p.key)" class="preset-checkbox" />
@@ -134,8 +138,8 @@
                 </div>
               </div>
               <div class="form-field">
-                <label class="form-label">自定义Prompt模板</label>
-                <textarea v-model="settings.prompt.customPromptTemplate" rows="10" class="form-textarea form-textarea--mono" placeholder="自定义Prompt模板"></textarea>
+                <label class="form-label">自定义提示词模板</label>
+                <textarea v-model="settings.prompt.customPromptTemplate" rows="10" class="form-textarea form-textarea--mono" placeholder="自定义提示词模板"></textarea>
               </div>
             </div>
           </div>
@@ -238,7 +242,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from "vue"
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue"
 import { axiosInstance, coreApiClient } from "@halo-dev/api-client"
 import { VPageHeader, VButton, VLoading, Toast, VModal, VSpace, IconPlug } from "@halo-dev/components"
 
@@ -247,17 +251,19 @@ const tabItems = [
   { label: "基本设置", value: "basic" },
   { label: "AI角色", value: "persona" },
   { label: "模型设置", value: "model" },
-  { label: "Prompt", value: "prompt" },
+  { label: "提示词", value: "prompt" },
   { label: "数据清理", value: "cleanup" },
 ]
 
 const promptVariables = [
   { name: '{{persona_prompt}}', desc: 'AI角色人格提示词（含已启用的预设）' },
   { name: '{{safety_prompt}}', desc: '安全规范提示词' },
+  { name: '{{output_guidance}}', desc: '输出规范（回复长度、风格约束等）' },
+  { name: '{{sentiment_hint}}', desc: '情感提示（根据评论情绪自动生成，可省略）' },
   { name: '{{post_title}}', desc: '文章标题' },
   { name: '{{post_date}}', desc: '文章发布日期' },
   { name: '{{comment_count}}', desc: '该文章的评论数' },
-  { name: '{{article}}', desc: '文章/页面内容（含标题）' },
+  { name: '{{article}}', desc: '文章/页面内容' },
   { name: '{{conversation_history}}', desc: '对话历史上下文' },
   { name: '{{comment}}', desc: '评论内容（含评论者名称）' },
 ]
@@ -270,11 +276,22 @@ const promptPresets = [
 ]
 
 const settings = reactive({
-  basic: { autoReply: true, autoPublish: true, maxRetryCount: 3, blockedCommenters: "", maxConversationRounds: 8, rateLimitPerMinute: 10, preFilterEnabled: true, preFilterPendingOnViolation: true },
+  basic: { autoReply: true, autoPublish: true, maxRetryCount: 3, blockedCommenters: "", maxConversationRounds: 8, rateLimitPerMinute: 10, preFilterEnabled: true, preFilterPendingOnViolation: true, momentsEnabled: true },
   model: { modelName: "" },
   prompt: { customPromptTemplate: "", enabledPresets: [] as string[] },
   cleanup: { cleanupEnabled: true, retentionDays: 30 },
 })
+
+// 瞬间插件可用性：仅当检测到瞬间插件已安装并启用时才显示对应开关
+const momentsAvailable = ref(false)
+const fetchMomentsStatus = async () => {
+  try {
+    const { data } = await axiosInstance.get(`${apiBase}/moments-status`)
+    momentsAvailable.value = !!(data?.installed || data?.enabled)
+  } catch {
+    momentsAvailable.value = false
+  }
+}
 
 const loading = ref(false)
 const saving = ref(false)
@@ -330,7 +347,8 @@ const parseCfg = (d:any, k:string) => { const v = d[k]; if(!v) return {}; if(typ
 const fetchSettings = async () => { loading.value=true; try { const { data } = await coreApiClient.configMap.getConfigMap({ name: configMapName }); if(data.data) { const d:any = data.data; const b = parseCfg(d,'basic'); const m = parseCfg(d,'model'); const p = parseCfg(d,'prompt'); const c = parseCfg(d,'cleanup'); if(b.autoReply !== undefined) Object.assign(settings.basic, b); if(m.modelName !== undefined) settings.model.modelName = m.modelName; if(p.customPromptTemplate !== undefined) { settings.prompt.customPromptTemplate = p.customPromptTemplate; settings.prompt.enabledPresets = Array.isArray(p.enabledPresets) ? p.enabledPresets : (p.enabledPresets||'').split(',').filter(Boolean) }; if(c.retentionDays !== undefined) Object.assign(settings.cleanup, c) } } catch(e){} finally { loading.value=false; lastSavedSnapshot.value = JSON.stringify(settings) } }
 const saveSettings = async () => { saving.value=true; try { const { data:l } = await coreApiClient.configMap.getConfigMap({ name: configMapName }); l.data = { ...l.data, basic: JSON.stringify(settings.basic), model: JSON.stringify(settings.model), prompt: JSON.stringify(settings.prompt), cleanup: JSON.stringify(settings.cleanup) }; await coreApiClient.configMap.updateConfigMap({ name: configMapName, configMap: l }); Toast.success("保存成功"); lastSavedSnapshot.value = JSON.stringify(settings) } catch(e){ Toast.error("保存失败") } finally { saving.value=false } }
 
-onMounted(async () => { await fetchSettings(); await fetchPersonas(); await computePersonaAvatars() })
+onMounted(async () => { await fetchSettings(); await fetchMomentsStatus(); await fetchPersonas(); await computePersonaAvatars() })
+onUnmounted(() => { clearTimeout(emailDebounce) })
 </script>
 
 <style scoped>

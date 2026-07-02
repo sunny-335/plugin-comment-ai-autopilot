@@ -39,6 +39,19 @@
       </select>
       <input v-model="filterKeyword" type="text" placeholder="搜索回复内容..." class="filter-input" />
       <button class="btn-reset" @click="resetFilters">重置</button>
+      <div class="autorefresh-group">
+        <button class="btn-autorefresh" :class="{ 'is-active': autoRefresh }" @click="toggleAutoRefresh" :title="autoRefresh ? '点击关闭实时刷新' : '点击开启实时刷新'">
+          <span class="autorefresh-dot" v-if="autoRefresh"></span>
+          {{ autoRefresh ? '实时刷新' : '实时刷新' }}
+        </button>
+        <select v-if="autoRefresh" v-model="autoRefreshSecs" class="autorefresh-interval" :title="`刷新间隔：${autoRefreshSecs}秒`">
+          <option :value="5">5s</option>
+          <option :value="10">10s</option>
+          <option :value="30">30s</option>
+          <option :value="60">60s</option>
+        </select>
+        <span v-if="autoRefresh" class="autorefresh-status">{{ lastRefreshLabel }}</span>
+      </div>
     </div>
 
     <!-- 列表区 -->
@@ -87,7 +100,7 @@
             <div class="footer-info">
               <span>评分: <strong>{{ reply.spec.score }}</strong></span>
               <span v-if="reply.spec.postSlug">
-                关联: <a :href="getPostUrl(reply.spec.postSlug)" target="_blank" class="post-link">{{ reply.spec.postSlug }}</a>
+                关联: <a :href="getPostUrl(reply.spec.postSlug, reply.spec.postKind)" target="_blank" class="post-link">{{ reply.spec.postSlug }}</a>
               </span>
               <span v-if="reply.spec.retryCount > 0" class="retry-text">重试 {{ reply.spec.retryCount }} 次</span>
             </div>
@@ -106,8 +119,8 @@
       <div v-if="totalPages > 1" class="pagination">
         <span>共 {{ total }} 条</span>
         <div class="pagination-btns">
-          <VButton size="sm" :disabled="page <= 1" @click="page--">上一页</VButton>
-          <VButton size="sm" :disabled="page >= totalPages" @click="page++">下一页</VButton>
+          <VButton size="sm" :disabled="page <= 1 || loading" @click="page--">上一页</VButton>
+          <VButton size="sm" :disabled="page >= totalPages || loading" @click="page++">下一页</VButton>
         </div>
       </div>
     </div>
@@ -151,7 +164,7 @@
 
     <!-- 误报反馈确认弹窗 -->
     <teleport to="body">
-      <div v-if="showFalsePositiveDialog" class="dialog-overlay" @click.self="showFalsePositiveDialog = false">
+      <div v-if="showFalsePositiveDialog" class="dialog-overlay" @click.self="closeFalsePositiveDialog">
         <div class="dialog-box fp-dialog">
           <div class="dialog-header">
             <h3>确认为误报？</h3>
@@ -167,7 +180,7 @@
               <button class="fp-btn fp-btn-secondary" :disabled="fpLoading" @click="handleFalsePositive('approveOnly')">
                 仅通过
               </button>
-              <button class="fp-btn fp-btn-ghost" :disabled="fpLoading" @click="showFalsePositiveDialog = false">
+              <button class="fp-btn fp-btn-ghost" :disabled="fpLoading" @click="closeFalsePositiveDialog">
                 取消
               </button>
             </div>
@@ -194,6 +207,93 @@ const showDialog = ref(false); const conversationLoading = ref(false); const con
 const showFalsePositiveDialog = ref(false); const falsePositiveTarget = ref<AiCommentReplyItem | null>(null); const fpLoading = ref(false);
 const triggerAiLoadingName = ref<string | null>(null);
 
+// 实时刷新：定时轮询新数据。暂停条件：标签页隐藏、loading 中、弹窗打开。
+// 优化：轻量变更检测、新记录提示、连续失败自动关闭、间隔可配置、用户操作后重置计时、保留滚动位置、显示相对更新时间
+const autoRefresh = ref(false); const autoRefreshSecs = ref(10); let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let consecutiveFailures = 0; const MAX_FAILURES = 5;
+const lastRefreshTime = ref<number | null>(null); let refreshRelativeTimer: ReturnType<typeof setInterval> | null = null;
+const lastRefreshLabel = ref("等待中…");
+let autoRefreshing = false; // 防止 autoRefreshTick 与 fetchReplies 竞态
+// 轻量签名：total + 首尾 name + 首尾状态，检测记录数量、顺序、状态变化
+const dataSignature = (items: any[], totalCount: number) => {
+  if (!items.length) return `${totalCount}|`;
+  const first = items[0]; const last = items[items.length - 1];
+  const firstStatus = first.spec?.status || ""; const lastStatus = last.spec?.status || "";
+  const firstPublished = first.spec?.published || "";
+  const lastPublished = last.spec?.published || "";
+  return `${totalCount}|${first.metadata.name}|${firstStatus}|${firstPublished}|${last.metadata.name}|${lastStatus}|${lastPublished}`;
+};
+const updateRelativeTime = () => {
+  if (lastRefreshTime.value == null) { lastRefreshLabel.value = "等待中…"; return; }
+  const diff = Math.floor((Date.now() - lastRefreshTime.value) / 1000);
+  if (diff < 5) lastRefreshLabel.value = "刚刚更新";
+  else if (diff < 60) lastRefreshLabel.value = `${diff}秒前更新`;
+  else lastRefreshLabel.value = `${Math.floor(diff / 60)}分钟前更新`;
+};
+const isPageVisible = () => !document.hidden;
+const autoRefreshTick = async () => {
+  // 标签页隐藏、正在加载、或存在打开的弹窗时不轮询，避免干扰用户操作
+  if (!autoRefresh.value || loading.value || autoRefreshing || showDialog.value || showFalsePositiveDialog.value) return;
+  autoRefreshing = true;
+  // 保留滚动位置：刷新前后记录并恢复 list-area 的 scrollTop
+  const listArea = document.querySelector(".list-area");
+  const savedScroll = listArea ? listArea.scrollTop : 0;
+  const prevSignature = dataSignature(replies.value, total.value);
+  const prevFirstPage = page.value === 1;
+  const prevCount = total.value;
+  try {
+    const params: any = { page: page.value, size: size.value }
+    if (filterStatus.value) params.status = filterStatus.value; if (filterSentiment.value) params.sentiment = filterSentiment.value; if (filterKeyword.value) params.keyword = filterKeyword.value;
+    const { data } = await axiosInstance.get("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies", { params })
+    const newItems = data.items || []; const newTotal = data.total || 0;
+    const newSignature = dataSignature(newItems, newTotal);
+    consecutiveFailures = 0; // 成功，重置失败计数
+    lastRefreshTime.value = Date.now();
+    updateRelativeTime();
+    // 仅当数据签名变化时更新，减少不必要的渲染
+    if (newSignature !== prevSignature) {
+      // 在首页且有新增记录时提示用户（仅在首页轮询能可靠判定"新增"）
+      if (prevFirstPage && newTotal > prevCount) {
+        Toast.success(`发现 ${newTotal - prevCount} 条新记录`);
+      }
+      replies.value = newItems; total.value = newTotal; totalPages.value = Math.ceil(newTotal / size.value);
+      // 数据删除导致当前页变空时，回退到上一页
+      if (replies.value.length === 0 && page.value > 1) { page.value--; }
+    }
+    // 恢复滚动位置
+    if (listArea) listArea.scrollTop = savedScroll;
+  } catch (e) {
+    consecutiveFailures++;
+    if (consecutiveFailures >= MAX_FAILURES) {
+      autoRefresh.value = false;
+      stopAutoRefresh();
+      Toast.warning(`连续 ${MAX_FAILURES} 次刷新失败，已自动关闭实时刷新`);
+    }
+  } finally {
+    autoRefreshing = false;
+  }
+};
+const startAutoRefresh = () => {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  consecutiveFailures = 0;
+  lastRefreshTime.value = null;
+  updateRelativeTime();
+  // 相对时间计时器：每秒更新 "N秒前更新" 文案
+  if (refreshRelativeTimer) clearInterval(refreshRelativeTimer);
+  refreshRelativeTimer = setInterval(updateRelativeTime, 1000);
+  autoRefreshTimer = setInterval(() => { if (isPageVisible()) autoRefreshTick(); }, autoRefreshSecs.value * 1000);
+};
+const stopAutoRefresh = () => {
+  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  if (refreshRelativeTimer) { clearInterval(refreshRelativeTimer); refreshRelativeTimer = null; }
+};
+const resetAutoRefreshTimer = () => { if (autoRefresh.value) startAutoRefresh(); };
+const toggleAutoRefresh = () => {
+  autoRefresh.value = !autoRefresh.value;
+  if (autoRefresh.value) { startAutoRefresh(); Toast.success("已开启实时刷新"); }
+  else { stopAutoRefresh(); Toast.success("已关闭实时刷新"); }
+};
+
 const toggleSelect = (name: string) => { selectedNames.value.has(name) ? selectedNames.value.delete(name) : selectedNames.value.add(name); selectAll.value = replies.value.length > 0 && replies.value.every(r => selectedNames.value.has(r.metadata.name)) }
 const toggleSelectAll = () => { if (selectAll.value) { selectedNames.value.clear(); selectAll.value = false } else { selectedNames.value = new Set(replies.value.map(r => r.metadata.name)); selectAll.value = true } }
 
@@ -204,7 +304,9 @@ const fetchReplies = async () => {
     if (filterStatus.value) params.status = filterStatus.value; if (filterSentiment.value) params.sentiment = filterSentiment.value; if (filterKeyword.value) params.keyword = filterKeyword.value;
     const { data } = await axiosInstance.get("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies", { params })
     replies.value = data.items || []; total.value = data.total || 0; totalPages.value = Math.ceil(total.value / size.value)
-  } catch (e) { Toast.error("获取数据失败") } finally { loading.value = false }
+    // 当前页数据为空且非首页时，回退到上一页（处理删除最后一页最后一条后的越界问题）
+    if (replies.value.length === 0 && page.value > 1 && totalPages.value > 0) { page.value = Math.min(page.value, totalPages.value); }
+  } catch (e) { Toast.error("获取数据失败"); total.value = 0; totalPages.value = 0; } finally { loading.value = false }
 }
 
 const openConversation = async (reply: AiCommentReplyItem) => {
@@ -225,7 +327,12 @@ const batchDelete = async () => { if(!selectedNames.value.size||batchLoading.val
 const getStatusLabel = (s: string) => { const m:any = { PASS: '通过', FAIL: '失败', PENDING: '待审', REJECTED: '拒绝', FILTERED: '已拦截', FALSE_POSITIVE: '误报通过' }; return m[s] || s }
 const getSentimentLabel = (s: string) => { const m:any = { VERY_POSITIVE: '极好', POSITIVE: '正面', NEUTRAL: '中性', NEGATIVE: '负面', VERY_NEGATIVE: '极差' }; return m[s] || s }
 const formatDate = (ts: string) => ts ? new Date(ts).toLocaleString("zh-CN") : ""
-const getPostUrl = (slug: string) => `${window.location.origin}/archives/${slug}`
+const getPostUrl = (slug: string, postKind?: string) => {
+  if (postKind === "Moment") {
+    return `${window.location.origin}/moments/${slug}`
+  }
+  return `${window.location.origin}/archives/${slug}`
+}
 const stripHtml = (html: string) => html ? html.replace(/<[^>]+>/g, "").replace(/\n+/g, " ").trim() : ""
 
 const truncateQuote = (content: string, length = 35) => {
@@ -237,22 +344,33 @@ const truncateQuote = (content: string, length = 35) => {
 
 const renderContent = (content: string) => {
   if (!content) return "<span style='opacity:0.5'>(空)</span>"
-  let parsed = content.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, "")
+  // XSS 防护：移除所有 on* 事件处理器、javascript: 协议、script/style/iframe/object/embed 标签
+  let parsed = content
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, "")
+    .replace(/<object[^>]*>[\s\S]*?<\/object>/gi, "")
+    .replace(/<embed[^>]*>/gi, "")
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, "")
+    .replace(/\son\w+\s*=\s*[^\s>]+/gi, "")
+    .replace(/(href|src)\s*=\s*["']?\s*javascript:/gi, "$1=\"\"")
+    .replace(/(href|src)\s*=\s*["']?\s*data:text\/html/gi, "$1=\"\"")
   parsed = parsed.replace(/^>\s*(?:💬\s*)?\*\*(.*?)\*\*\s*[:：]\s*/gm, "")
   return parsed.replace(/\n/g, "<br/>")
 }
 
-const resetFilters = () => { filterStatus.value = ""; filterSentiment.value = ""; filterKeyword.value = ""; page.value = 1; fetchReplies() }
+const resetFilters = () => { filterStatus.value = ""; filterSentiment.value = ""; filterKeyword.value = ""; page.value = 1; fetchReplies(); resetAutoRefreshTimer(); }
 
 const openFalsePositiveDialog = (reply: AiCommentReplyItem) => { falsePositiveTarget.value = reply; showFalsePositiveDialog.value = true }
+const closeFalsePositiveDialog = () => { showFalsePositiveDialog.value = false; falsePositiveTarget.value = null }
 const handleFalsePositive = async (action: string) => {
   if (!falsePositiveTarget.value) return
   fpLoading.value = true
   try {
     await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${falsePositiveTarget.value.metadata.name}/false-positive`, { action })
     Toast.success(action === "aiReply" ? "已标记为误报，AI回复正在后台生成" : "已标记为误报并通过")
-    showFalsePositiveDialog.value = false
-    falsePositiveTarget.value = null
+    closeFalsePositiveDialog()
     fetchReplies()
   } catch (e: any) {
     Toast.error(e?.response?.data?.message || "操作失败")
@@ -270,15 +388,23 @@ const handleTriggerAiReply = async (reply: AiCommentReplyItem) => {
   } finally { triggerAiLoadingName.value = null }
 }
 // 状态/情感筛选立即触发；关键词输入防抖 300ms 避免每次按键都请求
-watch([filterStatus, filterSentiment], () => { page.value = 1; fetchReplies() })
+watch([filterStatus, filterSentiment], () => { page.value = 1; fetchReplies(); resetAutoRefreshTimer(); })
 let keywordDebounceTimer: ReturnType<typeof setTimeout> | null = null
 watch(filterKeyword, () => {
   if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer)
-  keywordDebounceTimer = setTimeout(() => { page.value = 1; fetchReplies() }, 300)
+  keywordDebounceTimer = setTimeout(() => { page.value = 1; fetchReplies(); resetAutoRefreshTimer(); }, 300)
 })
-watch(page, () => { selectedNames.value.clear(); selectAll.value = false; fetchReplies() })
-onMounted(fetchReplies)
-onUnmounted(() => { if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer) })
+watch(page, () => { selectedNames.value.clear(); selectAll.value = false; fetchReplies(); resetAutoRefreshTimer(); })
+// 刷新间隔变化时重启计时器
+watch(autoRefreshSecs, () => { if (autoRefresh.value) startAutoRefresh(); })
+// 标签页重新可见时，若开启了实时刷新则立即拉取一次，保证回到页面时数据是最新的
+const handleVisibilityChange = () => { if (!document.hidden && autoRefresh.value) autoRefreshTick(); };
+onMounted(() => { fetchReplies(); document.addEventListener("visibilitychange", handleVisibilityChange); })
+onUnmounted(() => {
+  if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer);
+  stopAutoRefresh();
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
+})
 </script>
 
 <style scoped>
@@ -300,6 +426,16 @@ onUnmounted(() => { if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer)
 @media (min-width: 768px) { .filter-select { width: auto; min-width: 120px; } .filter-input { flex: 1; } }
 .btn-reset { padding: 8px 16px; border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb; cursor: pointer; white-space: nowrap; width: 100%; }
 @media (min-width: 768px) { .btn-reset { width: auto; } }
+.autorefresh-group { display: flex; align-items: center; gap: 6px; width: 100%; flex-wrap: wrap; }
+@media (min-width: 768px) { .autorefresh-group { width: auto; flex-wrap: nowrap; } }
+.btn-autorefresh { padding: 8px 16px; border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb; cursor: pointer; white-space: nowrap; font-size: 13px; color: #6b7280; display: flex; align-items: center; gap: 6px; transition: all 0.15s; }
+.btn-autorefresh:hover { background: #f3f4f6; }
+.btn-autorefresh.is-active { background: #dcfce7; border-color: #86efac; color: #15803d; }
+.autorefresh-dot { width: 8px; height: 8px; border-radius: 50%; background: #16a34a; animation: autorefresh-pulse 1.5s ease-in-out infinite; }
+@keyframes autorefresh-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.85); } }
+.autorefresh-interval { padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 6px; background: #f9fafb; font-size: 13px; color: #6b7280; cursor: pointer; }
+.autorefresh-interval:focus { outline: none; border-color: #86efac; }
+.autorefresh-status { font-size: 12px; color: #9ca3af; white-space: nowrap; min-width: 70px; }
 
 /* 列表区 */
 .list-area { margin: 16px; }

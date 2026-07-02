@@ -55,7 +55,7 @@ public class AiReplyCleanupService implements DisposableBean {
                     );
             })
             .subscribe(
-                null,
+                result -> {},
                 e -> log.error("[Cleanup] Error during daily cleanup: {}", e.getMessage(), e)
             );
     }
@@ -64,7 +64,7 @@ public class AiReplyCleanupService implements DisposableBean {
         return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
             .mapNotNull(cm -> {
                 var data = cm.getData();
-                if (data == null) return false;
+                if (data == null) return true;
                 String cleanupJson = data.get("cleanup");
                 if (cleanupJson == null || cleanupJson.isBlank()) return true;
                 try {
@@ -84,7 +84,10 @@ public class AiReplyCleanupService implements DisposableBean {
         return client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
             .filter(r -> {
                 Instant created = r.getMetadata().getCreationTimestamp();
-                return created != null && created.isBefore(cutoff);
+                if (created == null || !created.isBefore(cutoff)) return false;
+                // 不清理正在处理中的记录，避免破坏正在进行的 AI 回复流程
+                String status = r.getSpec().getStatus();
+                return !"PENDING".equals(status) && !"REVIEWING".equals(status);
             })
             .collectList()
             .flatMap(oldRecords -> {

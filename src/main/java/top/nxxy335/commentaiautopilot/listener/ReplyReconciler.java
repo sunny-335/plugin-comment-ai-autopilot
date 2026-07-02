@@ -152,7 +152,9 @@ public class ReplyReconciler implements Reconciler<Reconciler.Request> {
     private boolean isAiReply(String replyName) {
         return client.fetch(Reply.class, replyName)
             .map(reply -> {
-                var owner = reply.getSpec().getOwner();
+                var spec = reply.getSpec();
+                if (spec == null) return false;
+                var owner = spec.getOwner();
                 if (owner != null && owner.getName() != null
                     && owner.getName().startsWith(AI_PERSONA_OWNER_PREFIX)) {
                     return true;

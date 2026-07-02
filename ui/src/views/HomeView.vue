@@ -238,10 +238,13 @@ const fetchHealth = async () => {
   }
 }
 
-const refreshData = () => {
-  fetchStats()
-  fetchPersona()
-  Toast.success("数据已刷新")
+const refreshData = async () => {
+  try {
+    await Promise.all([fetchStats(), fetchPersona()])
+    Toast.success("数据已刷新")
+  } catch (e) {
+    Toast.error("刷新失败")
+  }
 }
 
 const openSettings = () => {

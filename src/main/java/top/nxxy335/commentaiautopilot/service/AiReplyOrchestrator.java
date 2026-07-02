@@ -154,21 +154,45 @@ public class AiReplyOrchestrator {
                                             String recordName) {
         log.info("[Orchestrator] Processing false-positive: comment={}, record={}", commentName, recordName);
 
+        // 加锁防止重复触发（与 processComment 使用相同的锁机制）
+        String lockKey = "fp:" + recordName;
+        long lockExpiry = System.currentTimeMillis() + LOCK_EXPIRY_MS;
+        Long existingExpiry = processingLocks.putIfAbsent(lockKey, lockExpiry);
+        if (existingExpiry != null && existingExpiry > System.currentTimeMillis()) {
+            log.warn("[Orchestrator] False-positive already in progress for record {}, skipping", recordName);
+            return Mono.empty();
+        }
+
         return getModelName().flatMap(modelName ->
             contextExtractor.extract(commentName, replyName, isAiConversation)
-                .flatMap(context -> {
-                    // Fetch the existing record (was FILTERED, now PENDING)
-                    return client.fetch(AiCommentReply.class, recordName)
+                .flatMap(context ->
+                    client.fetch(AiCommentReply.class, recordName)
+                        .switchIfEmpty(Mono.defer(() -> {
+                            log.warn("[Orchestrator] Record {} not found for false-positive", recordName);
+                            return Mono.empty();
+                        }))
                         .flatMap(replyRecord ->
                             sentimentService.analyzeSentiment(context.commentContent(), modelName)
                                 .flatMap(sentimentResult ->
                                     promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
                                         .flatMap(prompt -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
                                 )
-                        );
-                })
+                        )
+                )
         )
         .doOnError(e -> log.error("[Orchestrator] Error processing false-positive {}: {}", commentName, e.getMessage(), e))
+        .onErrorResume(e -> client.fetch(AiCommentReply.class, recordName)
+            .flatMap(rec -> {
+                rec.getSpec().setStatus("FAIL");
+                rec.getSpec().setFilterReason("误报处理后失败: " + e.getMessage());
+                return client.update(rec)
+                    .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                        .filter(ex -> ex instanceof OptimisticLockingFailureException));
+            }).onErrorResume(err -> {
+                log.error("[Orchestrator] Failed to mark record {} as FAIL: {}", recordName, err.getMessage());
+                return Mono.empty();
+            }).then())
+        .doFinally(signal -> processingLocks.remove(lockKey))
         .then();
     }
 
@@ -214,7 +238,7 @@ public class AiReplyOrchestrator {
                                   String personaName) {
         return getModelName().flatMap(modelName ->
             contextExtractor.extract(commentName, replyName, isAiConversation)
-                .flatMap(context -> preFilterService.check(context.commentContent(), modelName)
+                .flatMap(context -> preFilterService.check(context.commentOwner(), context.commentContent(), modelName)
                     .flatMap(preFilterResult -> {
                         if (!preFilterResult.passed()) {
                             log.warn("[Orchestrator] Comment pre-filtered: {}, reason: {}",
@@ -250,8 +274,8 @@ public class AiReplyOrchestrator {
             .hasElements()
             .defaultIfEmpty(false)
             .onErrorResume(e -> {
-                log.debug("[Orchestrator] Failed to check existing replies: {}", e.getMessage());
-                return Mono.just(false);
+                log.warn("[Orchestrator] Failed to check existing replies, aborting to prevent duplicates: {}", e.getMessage());
+                return Mono.just(true);
             });
     }
 
@@ -270,8 +294,8 @@ public class AiReplyOrchestrator {
             .hasElements()
             .defaultIfEmpty(false)
             .onErrorResume(e -> {
-                log.debug("[Orchestrator] Failed to check existing conversation replies: {}", e.getMessage());
-                return Mono.just(false);
+                log.warn("[Orchestrator] Failed to check existing conversation replies, aborting to prevent duplicates: {}", e.getMessage());
+                return Mono.just(true);
             });
     }
 
@@ -335,6 +359,7 @@ public class AiReplyOrchestrator {
             if (currentRetryCount < maxRetry) {
                 int newRetryCount = currentRetryCount + 1;
                 long delaySeconds = 5L * (1L << currentRetryCount); // 5 * 2^retryCount
+                delaySeconds = Math.min(delaySeconds, 300L); // 上限 5 分钟，避免指数退避过长导致锁过期与资源占用
                 log.info("[Orchestrator] Retrying ({}/{}) for {} after {}s, reason: {}",
                     newRetryCount, maxRetry, context.commentId(), delaySeconds, reason);
 

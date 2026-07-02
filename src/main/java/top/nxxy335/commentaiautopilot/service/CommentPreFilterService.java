@@ -51,11 +51,11 @@ public class CommentPreFilterService {
     );
 
     private static final String CLASSIFY_SYSTEM_PROMPT = """
-            你是评论内容合规检测员。请判断以下评论属于哪个类别：
+            你是评论内容合规检测员。请综合判断评论者昵称与评论内容属于哪个类别：
 
             类别定义：
             - 正常：正常的评论、提问、讨论、赞美、闲聊等，即使与文章主题无关也算正常
-            - 广告：包含推广链接、产品推销、引流信息等
+            - 广告：包含推广链接、产品推销、引流信息等；或评论者昵称本身即为广告（如"免费算命"、"加微信xxx"、"代写论文"、"低价代购"等带有明显商业推广意图的昵称）
             - 辱骂攻击：包含辱骂、人身攻击、恶意挑衅、歧视性言论等
             - 敏感内容：涉及政治敏感、违法违规、色情暴力等
             - 无意义：纯乱码、无意义字符堆砌（如随机符号、键盘乱敲）
@@ -85,9 +85,18 @@ public class CommentPreFilterService {
 
             【原则四：宁放勿杀】
             当你无法确定评论是否违规时，应判定为"正常"而非"辱骂攻击"。误杀正常评论比漏判违规评论的负面影响更大。
+            但昵称广告属于例外：当昵称明确包含商业推广关键词（如"免费算命"、"加微信"、"代写论文"、"低价代购"、"回收二手"、"破解版下载"等），即使评论内容本身看似正常，也应判定为"广告"。
 
             【原则五：闲聊不算无意义】
             与文章主题无关的闲聊、灌水、打招呼等属于"正常"，不要误判为"无意义"。
+
+            【原则六：昵称与内容综合判定】
+            评论者昵称和评论内容需综合判断。昵称广告的典型特征：
+            - 昵称直接包含联系方式（如"V: xxxxx"、"微信xxx"、QQ号）
+            - 昵称包含服务推广（如"免费算命"、"塔罗占卜"、"代写论文"、"论文发表"）
+            - 昵称包含商品推销（如"低价代购"、"正品口红"、"二手回收"）
+            - 昵称包含引流话术（如"关注公众号xxx"、"进群xxx"）
+            正常昵称（如"小明"、"博主粉丝"、"路过"）不应判为广告。
 
             只返回类别名称，不要返回其他内容。""";
 
@@ -102,11 +111,12 @@ public class CommentPreFilterService {
     /**
      * 检测评论是否合规。
      *
+     * @param commentOwner  评论者昵称（用于检测昵称广告，可为 null）
      * @param commentContent 评论内容（纯文本）
      * @param modelName       AI 模型名称
      * @return 检测结果
      */
-    public Mono<PreFilterResult> check(String commentContent, String modelName) {
+    public Mono<PreFilterResult> check(String commentOwner, String commentContent, String modelName) {
         return loadConfig().flatMap(config -> {
             if (!config.enabled()) {
                 log.info("[PreFilter] Pre-filter is DISABLED, allowing all comments");
@@ -116,8 +126,10 @@ public class CommentPreFilterService {
             // 剥离 HTML 标签，获取纯文本
             String plainText = stripHtml(commentContent);
             String truncated = truncate(plainText, 500);
-            String userPrompt = "评论内容：\n" + truncated;
-            log.info("[PreFilter] Checking comment (enabled=true): {}", truncated.substring(0, Math.min(50, truncated.length())));
+            String safeOwner = commentOwner == null ? "" : commentOwner;
+            String userPrompt = "评论者昵称：\n" + safeOwner + "\n\n评论内容：\n" + truncated;
+            log.info("[PreFilter] Checking comment (enabled=true): owner={}, content={}",
+                safeOwner, truncated.substring(0, Math.min(50, truncated.length())));
 
             return aiFoundationClient.classify(CLASSIFY_SYSTEM_PROMPT, userPrompt, CLASSIFY_CHOICES, modelName)
                 .doOnNext(result -> log.info("[PreFilter] AI classify returned: '{}'", result))
@@ -134,7 +146,8 @@ public class CommentPreFilterService {
                     String desc = CATEGORY_DESCRIPTIONS.getOrDefault(result, "检测到违规内容");
                     String snippet = truncated.substring(0, Math.min(50, truncated.length()));
                     String reason = desc + " — 「" + snippet + "」";
-                    log.warn("[PreFilter] Comment BLOCKED: category={}, content={}", result, snippet);
+                    log.warn("[PreFilter] Comment BLOCKED: category={}, owner={}, content={}",
+                        result, safeOwner, snippet);
                     return new PreFilterResult(false, result, reason);
                 })
                 // 分类失败时拦截评论（安全优先），而非放行
