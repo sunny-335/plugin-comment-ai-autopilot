@@ -28,6 +28,7 @@
         <option value="REJECTED">已拒绝</option>
         <option value="FILTERED">已拦截</option>
         <option value="FALSE_POSITIVE">误报通过</option>
+        <option value="DELETED">已删除</option>
       </select>
       <select v-model="filterSentiment" class="filter-select">
         <option value="">全部情感</option>
@@ -36,6 +37,11 @@
         <option value="NEUTRAL">中性</option>
         <option value="NEGATIVE">负面</option>
         <option value="VERY_NEGATIVE">非常负面</option>
+      </select>
+      <!-- 角色筛选：选项从 /personas 接口获取 -->
+      <select v-model="filterPersonaName" class="filter-select">
+        <option value="">全部角色</option>
+        <option v-for="p in personas" :key="p.metadata.name" :value="p.metadata.name">{{ p.spec.displayName }}</option>
       </select>
       <input v-model="filterKeyword" type="text" placeholder="搜索回复内容..." class="filter-input" />
       <button class="btn-reset" @click="resetFilters">重置</button>
@@ -72,6 +78,8 @@
                 <div class="tags-wrap">
                   <span class="custom-tag" :class="'tag-' + reply.spec.status">{{ getStatusLabel(reply.spec.status) }}</span>
                   <span class="custom-tag" :class="reply.spec.published ? 'tag-published' : 'tag-draft'">{{ reply.spec.published ? '已发布' : '未发布' }}</span>
+                  <!-- 回复角色名标签：从 record.spec.personaName 读取 -->
+                  <span v-if="reply.spec.personaName" class="custom-tag tag-persona">{{ getPersonaDisplayName(reply.spec.personaName) }}</span>
                   <span v-if="reply.spec.isAiConversation" class="custom-tag tag-conv">对话</span>
                   <span v-if="reply.spec.sentiment" class="custom-tag" :class="'tag-' + reply.spec.sentiment">{{ getSentimentLabel(reply.spec.sentiment) }}</span>
                 </div>
@@ -109,18 +117,23 @@
                 <button class="action-btn reject" @click="handleReject(reply.metadata.name)">拒绝</button>
               </template>
               <button class="action-btn view" @click="openConversation(reply)">查看对话</button>
-              <button class="action-btn delete" @click="handleDelete(reply.metadata.name)">删除</button>
+              <!-- 操作按钮：根据记录状态弹出不同操作选项 -->
+              <button class="action-btn action" @click="handleAction(reply)">操作</button>
             </div>
           </div>
         </div>
       </div>
       
-      <div v-if="totalPages > 1" class="pagination">
-        <span>共 {{ total }} 条</span>
-        <div class="pagination-btns">
-          <VButton size="sm" :disabled="page <= 1 || loading" @click="page--">上一页</VButton>
-          <VButton size="sm" :disabled="page >= totalPages || loading" @click="page++">下一页</VButton>
-        </div>
+      <div class="pagination-wrap" v-if="total > 0">
+        <VPagination
+          :page="page"
+          :size="size"
+          :total="total"
+          :size-options="sizeOptions"
+          :total-label="`共 ${total} 条`"
+          @update:page="onPageChange"
+          @update:size="onSizeChange"
+        />
       </div>
     </div>
 
@@ -187,13 +200,56 @@
         </div>
       </div>
     </teleport>
+
+    <!-- 操作确认弹窗：根据记录状态显示不同操作选项 -->
+    <VModal v-model:visible="showActionDialog" title="操作确认" :width="500">
+      <!-- 已发布状态（PASS 且 published=true）：显示取消通过选项 -->
+      <div v-if="actionDialogMode === 'published'" class="action-options">
+        <p class="action-tip">该回复已发布，请选择取消方式：</p>
+        <button class="action-option" :disabled="actionLoading" @click="confirmUnpublishAiReply">
+          <span class="option-title">取消通过AI回复</span>
+          <span class="option-desc">仅取消已发布的AI回复，保留评论者评论</span>
+        </button>
+        <button class="action-option" :disabled="actionLoading" @click="confirmUnpublishComment">
+          <span class="option-title">取消通过评论者评论</span>
+          <span class="option-desc">取消通过该评论者的评论</span>
+        </button>
+      </div>
+      <!-- DELETED 状态：显示触发AI回复提示 -->
+      <div v-else-if="actionDialogMode === 'deleted'" class="action-single">
+        <p class="action-tip">该记录的评论已被删除，是否重新触发AI回复？</p>
+      </div>
+      <!-- 已拦截状态：显示删除违规评论提示 -->
+      <div v-else-if="actionDialogMode === 'filtered'" class="action-single">
+        <p class="action-tip">确定要删除此条违规评论吗？日志将保留。</p>
+      </div>
+      <!-- 其他状态（PENDING/FAIL/FALSE_POSITIVE 等）：显示删除选项 -->
+      <div v-else class="action-options">
+        <p class="action-tip">请选择操作方式：</p>
+        <button class="action-option" :disabled="actionLoading" @click="confirmDeleteAiReply">
+          <span class="option-title">仅删除AI回评</span>
+          <span class="option-desc">只删除AI生成的回复，保留原评论</span>
+        </button>
+        <button class="action-option" :disabled="actionLoading" @click="confirmDeleteComment">
+          <span class="option-title">删除评论者评论</span>
+          <span class="option-desc">删除原始评论及关联的AI回复</span>
+        </button>
+      </div>
+      <template #footer>
+        <VButton @click="showActionDialog = false" :disabled="actionLoading">取消</VButton>
+        <!-- DELETED 状态：触发AI回复按钮 -->
+        <VButton v-if="actionDialogMode === 'deleted'" type="primary" :loading="actionLoading" @click="confirmTriggerAiFromAction">触发AI回复</VButton>
+        <!-- 已拦截状态：删除违规评论按钮 -->
+        <VButton v-if="actionDialogMode === 'filtered'" type="danger" :loading="actionLoading" @click="confirmDeleteViolationComment">删除违规评论</VButton>
+      </template>
+    </VModal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from "vue"
 import { axiosInstance } from "@halo-dev/api-client"
-import { VPageHeader, VButton, VLoading, Toast } from "@halo-dev/components"
+import { VPageHeader, VButton, VLoading, VModal, VPagination, Toast } from "@halo-dev/components"
 import { IconPlug } from "@halo-dev/components"
 
 interface AiCommentReplyItem { metadata: { name: string; creationTimestamp: string }; spec: any }
@@ -201,14 +257,39 @@ interface ConversationMessage { type: string; owner: string; content: string; ti
 
 const replies = ref<AiCommentReplyItem[]>([]); const loading = ref(false); const batchLoading = ref(false); const page = ref(1); const size = ref(20); const total = ref(0); const totalPages = ref(0);
 const selectedNames = ref<Set<string>>(new Set()); const selectAll = ref(false);
-const filterStatus = ref(""); const filterSentiment = ref(""); const filterKeyword = ref("");
+const filterStatus = ref(""); const filterSentiment = ref(""); const filterKeyword = ref(""); const filterPersonaName = ref("");
 const showDialog = ref(false); const conversationLoading = ref(false); const conversationMessages = ref<ConversationMessage[]>([]);
 const showFalsePositiveDialog = ref(false); const falsePositiveTarget = ref<AiCommentReplyItem | null>(null); const fpLoading = ref(false);
 const triggerAiLoadingName = ref<string | null>(null);
+// 角色列表（用于筛选项和角色名显示），从 /personas 接口获取
+const personas = ref<any[]>([]);
+// 操作确认弹窗状态
+const showActionDialog = ref(false);
+const actionTarget = ref<AiCommentReplyItem | null>(null);
+// 操作弹窗模式：published=已发布取消通过 / deleted=触发AI回复 / filtered=删除违规评论 / normal=删除选项
+const actionDialogMode = ref<"normal" | "published" | "deleted" | "filtered">("normal");
+const actionLoading = ref(false);
+// 分页每页条数选项
+const sizeOptions = [10, 20, 50, 100];
 
 // 实时刷新：定时轮询新数据。暂停条件：标签页隐藏、loading 中、弹窗打开。
 // 优化：轻量变更检测、新记录提示、连续失败自动关闭、间隔可配置、用户操作后重置计时、保留滚动位置
-const autoRefresh = ref(false); const autoRefreshSecs = ref(10); let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+const AUTOREFRESH_KEY = 'caa-logs-autorefresh'
+const loadAutoRefreshPrefs = () => {
+  try {
+    const raw = localStorage.getItem(AUTOREFRESH_KEY)
+    if (raw) {
+      const p = JSON.parse(raw)
+      return { enabled: p.enabled !== false, secs: Number(p.secs) > 0 ? Number(p.secs) : 10 }
+    }
+  } catch {}
+  return { enabled: true, secs: 10 }
+}
+const saveAutoRefreshPrefs = () => {
+  try { localStorage.setItem(AUTOREFRESH_KEY, JSON.stringify({ enabled: autoRefresh.value, secs: autoRefreshSecs.value })) } catch {}
+}
+const prefs = loadAutoRefreshPrefs()
+const autoRefresh = ref(prefs.enabled); const autoRefreshSecs = ref(prefs.secs); let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let consecutiveFailures = 0; const MAX_FAILURES = 5;
 let autoRefreshing = false; // 防止 autoRefreshTick 与 fetchReplies 竞态
 // 轻量签名：total + 首尾 name + 首尾状态，检测记录数量、顺序、状态变化
@@ -223,7 +304,7 @@ const dataSignature = (items: any[], totalCount: number) => {
 const isPageVisible = () => !document.hidden;
 const autoRefreshTick = async () => {
   // 标签页隐藏、正在加载、或存在打开的弹窗时不轮询，避免干扰用户操作
-  if (!autoRefresh.value || loading.value || autoRefreshing || showDialog.value || showFalsePositiveDialog.value) return;
+  if (!autoRefresh.value || loading.value || autoRefreshing || showDialog.value || showFalsePositiveDialog.value || showActionDialog.value) return;
   autoRefreshing = true;
   // 保留滚动位置：刷新前后记录并恢复 list-area 的 scrollTop
   const listArea = document.querySelector(".list-area");
@@ -233,7 +314,7 @@ const autoRefreshTick = async () => {
   const prevCount = total.value;
   try {
     const params: any = { page: page.value, size: size.value }
-    if (filterStatus.value) params.status = filterStatus.value; if (filterSentiment.value) params.sentiment = filterSentiment.value; if (filterKeyword.value) params.keyword = filterKeyword.value;
+    if (filterStatus.value) params.status = filterStatus.value; if (filterSentiment.value) params.sentiment = filterSentiment.value; if (filterKeyword.value) params.keyword = filterKeyword.value; if (filterPersonaName.value) params.personaName = filterPersonaName.value;
     const { data } = await axiosInstance.get("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies", { params })
     const newItems = data.items || []; const newTotal = data.total || 0;
     const newSignature = dataSignature(newItems, newTotal);
@@ -283,13 +364,46 @@ const fetchReplies = async () => {
   loading.value = true;
   try {
     const params: any = { page: page.value, size: size.value }
-    if (filterStatus.value) params.status = filterStatus.value; if (filterSentiment.value) params.sentiment = filterSentiment.value; if (filterKeyword.value) params.keyword = filterKeyword.value;
+    if (filterStatus.value) params.status = filterStatus.value; if (filterSentiment.value) params.sentiment = filterSentiment.value; if (filterKeyword.value) params.keyword = filterKeyword.value; if (filterPersonaName.value) params.personaName = filterPersonaName.value;
     const { data } = await axiosInstance.get("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies", { params })
     replies.value = data.items || []; total.value = data.total || 0; totalPages.value = Math.ceil(total.value / size.value)
     // 当前页数据为空且非首页时，回退到上一页（处理删除最后一页最后一条后的越界问题）
     if (replies.value.length === 0 && page.value > 1 && totalPages.value > 0) { page.value = Math.min(page.value, totalPages.value); }
   } catch (e) { Toast.error("获取数据失败"); total.value = 0; totalPages.value = 0; } finally { loading.value = false }
 }
+
+// 获取角色列表：用于筛选下拉项和角色名标签显示
+const fetchPersonas = async () => {
+  try {
+    const { data } = await axiosInstance.get("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/personas");
+    // 兼容数组与分页对象两种返回格式
+    personas.value = Array.isArray(data) ? data : (data.items || []);
+  } catch (e) { /* 静默失败，不影响页面加载 */ }
+};
+// 根据角色 metadata.name 获取显示名，找不到则回退到原始名
+const getPersonaDisplayName = (personaName: string) => {
+  if (!personaName) return "";
+  const p = personas.value.find((x: any) => x.metadata.name === personaName);
+  return p?.spec?.displayName || personaName;
+};
+
+// 分页：页码变化。仅更新 page，由 watch(page) 统一处理选中项清空与刷新
+const onPageChange = (newPage: number) => {
+  if (page.value === newPage) return;
+  page.value = newPage;
+};
+// 分页：每页条数变化。重置 page=1；若 page 本就是 1，watch(page) 不会触发，需手动刷新
+const onSizeChange = (newSize: number) => {
+  size.value = newSize;
+  if (page.value !== 1) {
+    page.value = 1;
+  } else {
+    selectedNames.value.clear();
+    selectAll.value = false;
+    fetchReplies();
+    resetAutoRefreshTimer();
+  }
+};
 
 const openConversation = async (reply: AiCommentReplyItem) => {
   showDialog.value = true; conversationLoading.value = true; conversationMessages.value = []
@@ -299,14 +413,98 @@ const openConversation = async (reply: AiCommentReplyItem) => {
   } catch (e) { Toast.error("获取对话失败") } finally { conversationLoading.value = false }
 }
 
-const handleDelete = async (name: string) => { try { await axiosInstance.delete(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${name}`); Toast.success("删除成功"); fetchReplies() } catch (e) { Toast.error("删除失败") } }
+// 操作按钮：根据记录状态弹出不同的操作弹窗
+const handleAction = (reply: AiCommentReplyItem) => {
+  actionTarget.value = reply;
+  const status = reply.spec.status;
+  // 已发布状态（PASS 且 published=true）：显示取消通过选项
+  if (status === "PASS" && reply.spec.published) {
+    actionDialogMode.value = "published";
+  } else if (status === "DELETED") {
+    // DELETED 状态：显示触发AI回复
+    actionDialogMode.value = "deleted";
+  } else if (status === "FILTERED") {
+    // 已拦截状态：显示删除违规评论
+    actionDialogMode.value = "filtered";
+  } else {
+    // 其他状态（PENDING/FAIL/FALSE_POSITIVE 等）：显示删除选项
+    actionDialogMode.value = "normal";
+  }
+  showActionDialog.value = true;
+};
+// 取消通过AI回复（已发布状态）
+const confirmUnpublishAiReply = async () => {
+  if (!actionTarget.value || actionLoading.value) return;
+  actionLoading.value = true;
+  try {
+    await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${actionTarget.value.metadata.name}/unpublish-ai-reply`);
+    Toast.success("已取消通过AI回复");
+    showActionDialog.value = false;
+    fetchReplies();
+  } catch (e: any) { Toast.error(e?.response?.data?.message || "操作失败") } finally { actionLoading.value = false }
+};
+// 取消通过评论者评论（已发布状态）
+const confirmUnpublishComment = async () => {
+  if (!actionTarget.value || actionLoading.value) return;
+  actionLoading.value = true;
+  try {
+    await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${actionTarget.value.metadata.name}/unpublish-comment`);
+    Toast.success("已取消通过评论者评论");
+    showActionDialog.value = false;
+    fetchReplies();
+  } catch (e: any) { Toast.error(e?.response?.data?.message || "操作失败") } finally { actionLoading.value = false }
+};
+// 触发AI回复（DELETED 状态，从操作弹窗触发）
+const confirmTriggerAiFromAction = async () => {
+  if (!actionTarget.value || actionLoading.value) return;
+  actionLoading.value = true;
+  try {
+    await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${actionTarget.value.metadata.name}/false-positive`, { action: "aiReply" });
+    Toast.success("AI回复正在后台生成");
+    showActionDialog.value = false;
+    fetchReplies();
+  } catch (e: any) { Toast.error(e?.response?.data?.message || "操作失败") } finally { actionLoading.value = false }
+};
+// 删除违规评论（已拦截状态，删除实际 Comment，日志保留）
+const confirmDeleteViolationComment = async () => {
+  if (!actionTarget.value || actionLoading.value) return;
+  actionLoading.value = true;
+  try {
+    await axiosInstance.delete(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${actionTarget.value.metadata.name}/comment`);
+    Toast.success("违规评论已删除，日志已保留");
+    showActionDialog.value = false;
+    fetchReplies();
+  } catch (e: any) { Toast.error(e?.response?.data?.message || "删除失败") } finally { actionLoading.value = false }
+};
+// 仅删除AI回评（其他状态）
+const confirmDeleteAiReply = async () => {
+  if (!actionTarget.value || actionLoading.value) return;
+  actionLoading.value = true;
+  try {
+    await axiosInstance.delete(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${actionTarget.value.metadata.name}/ai-reply`);
+    Toast.success("AI回评已删除");
+    showActionDialog.value = false;
+    fetchReplies();
+  } catch (e) { Toast.error("删除失败") } finally { actionLoading.value = false }
+};
+// 删除评论者评论（其他状态）
+const confirmDeleteComment = async () => {
+  if (!actionTarget.value || actionLoading.value) return;
+  actionLoading.value = true;
+  try {
+    await axiosInstance.delete(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${actionTarget.value.metadata.name}/comment`);
+    Toast.success("评论者评论已删除");
+    showActionDialog.value = false;
+    fetchReplies();
+  } catch (e) { Toast.error("删除失败") } finally { actionLoading.value = false }
+};
 const handleApprove = async (name: string) => { try { await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${name}/approve`); Toast.success("审核通过"); fetchReplies() } catch (e) { Toast.error("审核失败") } }
 const handleReject = async (name: string) => { try { await axiosInstance.post(`/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/${name}/reject`); Toast.success("已拒绝"); fetchReplies() } catch (e) { Toast.error("拒绝失败") } }
 const batchApprove = async () => { if(!selectedNames.value.size||batchLoading.value) return; batchLoading.value=true; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-approve", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } finally { batchLoading.value=false } }
 const batchReject = async () => { if(!selectedNames.value.size||batchLoading.value) return; batchLoading.value=true; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-reject", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } finally { batchLoading.value=false } }
 const batchDelete = async () => { if(!selectedNames.value.size||batchLoading.value) return; batchLoading.value=true; try { await axiosInstance.post("/apis/console.api.comment-ai-autopilot.nxxy335.top/v1alpha1/replies/batch-delete", { names: Array.from(selectedNames.value) }); Toast.success("成功"); selectedNames.value.clear(); selectAll.value=false; fetchReplies() } catch(e) { Toast.error("失败") } finally { batchLoading.value=false } }
 
-const getStatusLabel = (s: string) => { const m:any = { PASS: '通过', FAIL: '失败', PENDING: '待审', REJECTED: '拒绝', FILTERED: '已拦截', FALSE_POSITIVE: '误报通过' }; return m[s] || s }
+const getStatusLabel = (s: string) => { const m:any = { PASS: '通过', FAIL: '失败', PENDING: '待审', REJECTED: '拒绝', FILTERED: '已拦截', FALSE_POSITIVE: '误报通过', DELETED: '已删除' }; return m[s] || s }
 const getSentimentLabel = (s: string) => { const m:any = { VERY_POSITIVE: '极好', POSITIVE: '正面', NEUTRAL: '中性', NEGATIVE: '负面', VERY_NEGATIVE: '极差' }; return m[s] || s }
 const formatDate = (ts: string) => ts ? new Date(ts).toLocaleString("zh-CN") : ""
 const getPostUrl = (slug: string, postKind?: string) => {
@@ -342,7 +540,7 @@ const renderContent = (content: string) => {
   return parsed.replace(/\n/g, "<br/>")
 }
 
-const resetFilters = () => { filterStatus.value = ""; filterSentiment.value = ""; filterKeyword.value = ""; page.value = 1; fetchReplies(); resetAutoRefreshTimer(); }
+const resetFilters = () => { filterStatus.value = ""; filterSentiment.value = ""; filterKeyword.value = ""; filterPersonaName.value = ""; page.value = 1; fetchReplies(); resetAutoRefreshTimer(); }
 
 const openFalsePositiveDialog = (reply: AiCommentReplyItem) => { falsePositiveTarget.value = reply; showFalsePositiveDialog.value = true }
 const closeFalsePositiveDialog = () => { showFalsePositiveDialog.value = false; falsePositiveTarget.value = null }
@@ -369,8 +567,8 @@ const handleTriggerAiReply = async (reply: AiCommentReplyItem) => {
     Toast.error(e?.response?.data?.message || "触发失败")
   } finally { triggerAiLoadingName.value = null }
 }
-// 状态/情感筛选立即触发；关键词输入防抖 300ms 避免每次按键都请求
-watch([filterStatus, filterSentiment], () => { page.value = 1; fetchReplies(); resetAutoRefreshTimer(); })
+// 状态/情感/角色筛选立即触发；关键词输入防抖 300ms 避免每次按键都请求
+watch([filterStatus, filterSentiment, filterPersonaName], () => { page.value = 1; fetchReplies(); resetAutoRefreshTimer(); })
 let keywordDebounceTimer: ReturnType<typeof setTimeout> | null = null
 watch(filterKeyword, () => {
   if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer)
@@ -379,9 +577,10 @@ watch(filterKeyword, () => {
 watch(page, () => { selectedNames.value.clear(); selectAll.value = false; fetchReplies(); resetAutoRefreshTimer(); })
 // 刷新间隔变化时重启计时器
 watch(autoRefreshSecs, () => { if (autoRefresh.value) startAutoRefresh(); })
+watch([autoRefresh, autoRefreshSecs], saveAutoRefreshPrefs)
 // 标签页重新可见时，若开启了实时刷新则立即拉取一次，保证回到页面时数据是最新的
 const handleVisibilityChange = () => { if (!document.hidden && autoRefresh.value) autoRefreshTick(); };
-onMounted(() => { fetchReplies(); document.addEventListener("visibilitychange", handleVisibilityChange); })
+onMounted(() => { fetchReplies(); fetchPersonas(); document.addEventListener("visibilitychange", handleVisibilityChange); if (autoRefresh.value) startAutoRefresh(); })
 onUnmounted(() => {
   if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer);
   stopAutoRefresh();
@@ -454,13 +653,15 @@ onUnmounted(() => {
 .action-btn.pass { background: #dcfce7; color: #16a34a; }
 .action-btn.reject { background: #fee2e2; color: #dc2626; }
 .action-btn.view { background: #dbeafe; color: #2563eb; }
-.action-btn.delete { background: #e5e7eb; color: #4b5563; }
+.action-btn.action { background: #e5e7eb; color: #4b5563; }
 
 /* 标签体系 */
 .custom-tag { padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-.tag-PASS { background: #dcfce7; color: #15803d; } .tag-FAIL { background: #fee2e2; color: #b91c1c; } .tag-PENDING { background: #fef9c3; color: #a16207; } .tag-REJECTED { background: #ffedd5; color: #c2410c; } .tag-FILTERED { background: #f1f5f9; color: #b45309; border: 1px solid #fde68a; } .tag-FALSE_POSITIVE { background: #dbeafe; color: #1d4ed8; border: 1px solid #93c5fd; }
+.tag-PASS { background: #dcfce7; color: #15803d; } .tag-FAIL { background: #fee2e2; color: #b91c1c; } .tag-PENDING { background: #fef9c3; color: #a16207; } .tag-REJECTED { background: #ffedd5; color: #c2410c; } .tag-FILTERED { background: #f1f5f9; color: #b45309; border: 1px solid #fde68a; } .tag-FALSE_POSITIVE { background: #dbeafe; color: #1d4ed8; border: 1px solid #93c5fd; } .tag-DELETED { background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db; }
 .tag-published { background: #dbeafe; color: #1d4ed8; } .tag-draft { background: #f3f4f6; color: #4b5563; }
 .tag-conv { background: #f3e8ff; color: #7e22ce; }
+/* 角色名标签：小号灰色标签 */
+.tag-persona { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; font-weight: 500; }
 .tag-VERY_POSITIVE { background: #dcfce7; color: #14532d; } .tag-POSITIVE { background: #ecfdf5; color: #15803d; } .tag-NEUTRAL { background: #f3f4f6; color: #4b5563; } .tag-NEGATIVE { background: #ffe4e6; color: #e11d48; } .tag-VERY_NEGATIVE { background: #fee2e2; color: #991b1b; }
 
 /* 对话弹窗与响应式气泡 */
@@ -501,9 +702,18 @@ onUnmounted(() => {
 .bubble-user .quote-owner { color: #ffffff; }
 .quote-content { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; }
 
-.pagination { display: flex; flex-direction: column; gap: 12px; align-items: center; margin-top: 20px; font-size: 14px; color: #6b7280; }
-@media (min-width: 640px) { .pagination { flex-direction: row; justify-content: space-between; } }
-.pagination-btns { display: flex; gap: 8px; }
+/* 分页容器：使用 Halo 官方 VPagination 组件 */
+.pagination-wrap { margin-top: 20px; display: flex; justify-content: flex-end; align-items: center; }
+
+/* 操作确认弹窗内容 */
+.action-options { display: flex; flex-direction: column; gap: 10px; }
+.action-single { padding: 4px 0; }
+.action-tip { margin: 0 0 4px; font-size: 14px; color: #4b5563; line-height: 1.6; }
+.action-option { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; cursor: pointer; text-align: left; transition: all 0.15s; }
+.action-option:hover:not(:disabled) { border-color: #fca5a5; background: #fef2f2; }
+.action-option:disabled { opacity: 0.6; cursor: not-allowed; }
+.option-title { font-size: 14px; font-weight: 600; color: #1f2937; }
+.option-desc { font-size: 12px; color: #6b7280; line-height: 1.5; }
 
 /* 误报反馈弹窗 */
 .fp-dialog { max-width: 440px; }

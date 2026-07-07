@@ -18,27 +18,38 @@ spec:
         - $formkit: number
           name: maxRetryCount
           label: 最大重试次数
+          help: AI生成失败时的最大重试次数，0表示不重试，最大10次
           value: 3
-          min: 1
+          min: 0
           max: 10
         - $formkit: number
-          name: maxConversationRounds
+          name: maxConversationTurns
           label: 最大对话轮次
-          help: 同一评论线程中AI最多自动回复的轮次，超过后不再回复
-          value: 8
-          min: 1
+          help: AI在同一评论线程中自动回复的最大轮次，0表示不限制
+          value: 10
+          min: 0
           max: 100
         - $formkit: number
-          name: rateLimitPerMinute
+          name: rateLimitPerHour
           label: 速率限制
-          help: 每分钟最大AI回复数量，防止批量评论消耗过多额度
-          value: 10
-          min: 1
-          max: 100
+          help: 每小时最大AI回复数量，0表示不限制
+          value: 0
+          min: 0
+          max: 3600
         - $formkit: textarea
           name: blockedCommenters
           label: 评论者黑名单
           help: "输入评论者显示名称或邮箱，多个用逗号分隔。支持正则表达式，以 regex: 开头，如 regex:^spam.*"
+          value: ""
+        - $formkit: switch
+          name: whitelistEnabled
+          label: 启用白名单
+          help: "管理员与白名单内评论者跳过前置过滤拦截，避免误伤可信评论"
+          value: true
+        - $formkit: textarea
+          name: whitelistedCommenters
+          label: 白名单评论者
+          help: "每行一个评论者显示名称或用户名。命中名单的评论者将跳过AI前置过滤与拦截"
           value: ""
         - $formkit: switch
           name: preFilterEnabled
@@ -55,6 +66,11 @@ spec:
           label: 瞬间评论区适配
           help: "为瞬间插件(Moments)的评论区启用AI自动回复，需安装并启用瞬间插件"
           value: true
+        - $formkit: switch
+          name: pagesEnabled
+          label: 启用页面AI回复
+          help: "开启后所有独立页面(SinglePage)默认开启AI回复，包括新建页面；关闭则所有页面默认关闭"
+          value: false
     - group: model
       label: 模型设置
       formSchema:
@@ -63,28 +79,43 @@ spec:
           label: AI模型名称
           help: 留空使用AI Foundation默认模型，填写AiModel资源名称可指定模型
           value: ""
+    - group: persona
+      label: AI角色
+      formSchema:
+        - $formkit: textarea
+          name: categoryPersonaMap
+          label: 分类角色映射
+          help: "为文章分类指定AI角色，JSON格式：{\"分类名\":\"角色名\"}。未配置的分类使用默认角色"
+          value: ""
     - group: prompt
       label: 提示词设置
       formSchema:
         - $formkit: textarea
-          name: customPromptTemplate
-          label: 自定义提示词模板
-          value: "{{persona_prompt}}\n\n{{safety_prompt}}\n\n{{language_requirement}}\n\n{{output_guidance}}\n\n{{sentiment_hint}}\n文章标题：{{post_title}}\n发布日期：{{post_date}}\n评论数：{{comment_count}}\n文章（仅供理解上下文，不要复述）：\n{{article}}\n\n{{conversation_history}}\n评论：\n{{comment}}"
-        - $formkit: select
-          name: enabledPresets
-          label: 启用预设
-          help: 选择要启用的提示词预设风格
-          value: []
-          multiple: true
-          options:
-            - label: 友好型
-              value: friendly
-            - label: 专业型
-              value: professional
-            - label: 幽默型
-              value: humorous
-            - label: 简洁型
-              value: concise
+          name: personaIdentity
+          label: 角色身份提示词
+          help: "定义AI角色的基础身份与对话风格，留空使用默认值"
+          value: ""
+        - $formkit: textarea
+          name: safetyReview
+          label: 安全审核提示词
+          help: "内容安全红线与边界约束，留空使用默认值"
+          value: ""
+          condition: "{{ preFilterEnabled }}"
+        - $formkit: textarea
+          name: sentimentAdapter
+          label: 情感适配提示词
+          help: "依据评论情感倾向调整回复语气，留空使用默认值"
+          value: ""
+        - $formkit: textarea
+          name: outputGuidance
+          label: 输出规范提示词
+          help: "回复长度/格式/风格等通用约束，留空使用默认值"
+          value: ""
+        - $formkit: textarea
+          name: languageRequirement
+          label: 语言要求提示词
+          help: "根据评论语言自动匹配回复语言的约束，留空使用默认值"
+          value: ""
     - group: cleanup
       label: 数据清理
       formSchema:
@@ -99,4 +130,3 @@ spec:
           value: 30
           min: 1
           max: 365
-

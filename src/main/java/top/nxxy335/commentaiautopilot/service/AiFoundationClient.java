@@ -98,4 +98,29 @@ public class AiFoundationClient {
             return Mono.just(false);
         });
     }
+
+    public Mono<Boolean> hasModel(String modelName) {
+        return Mono.defer(() -> {
+            try {
+                return AiFoundationDelegate.hasModel(extensionGetter, modelName);
+            } catch (NoClassDefFoundError e) {
+                log.debug("AI Foundation API not on classpath: {}", e.getMessage());
+                return Mono.just(false);
+            }
+        })
+        .onErrorResume(NoClassDefFoundError.class, e -> Mono.just(false))
+        .onErrorResume(e -> {
+            log.debug("AI Foundation hasModel check failed: {}", e.getMessage());
+            return Mono.just(false);
+        });
+    }
+
+    public boolean isInstalled() {
+        try {
+            Class.forName("run.halo.aifoundation.AiModelService");
+            return true;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+    }
 }

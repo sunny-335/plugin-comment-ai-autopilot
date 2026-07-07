@@ -57,7 +57,7 @@ AI回复者的显示名称，默认为「小回」。修改后新回复将使用
 3. 头像URL存储在评论的 `owner.annotations["avatar"]` 中
 
 ::: warning
-如果不填写邮箱，AI回复者将使用 Halo 默认头像。
+如果不填写邮箱，AI回复者将使用 Gravatar 默认头像。
 :::
 
 ### 头像预览

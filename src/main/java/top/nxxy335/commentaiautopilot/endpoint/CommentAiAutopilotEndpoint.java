@@ -7,6 +7,7 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import run.halo.app.core.extension.Plugin;
 import run.halo.app.core.extension.content.Comment;
 import run.halo.app.core.extension.content.Reply;
 import run.halo.app.core.extension.endpoint.CustomEndpoint;
@@ -23,9 +24,11 @@ import top.nxxy335.commentaiautopilot.extension.AiPersona;
 import top.nxxy335.commentaiautopilot.service.AiFoundationClient;
 import top.nxxy335.commentaiautopilot.service.AiReplyCleanupService;
 import top.nxxy335.commentaiautopilot.service.AiReplyOrchestrator;
+import top.nxxy335.commentaiautopilot.service.CommentNextDetectionService;
 import top.nxxy335.commentaiautopilot.service.CommentReplyPublisher;
 import top.nxxy335.commentaiautopilot.service.MomentsIntegrationService;
 import top.nxxy335.commentaiautopilot.service.PersonaResolver;
+import top.nxxy335.commentaiautopilot.service.WhitelistService;
 import top.nxxy335.commentaiautopilot.util.GravatarUtil;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -61,10 +64,12 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     private final ObjectMapper objectMapper;
     private final PersonaResolver personaResolver;
     private final MomentsIntegrationService momentsIntegrationService;
+    private final WhitelistService whitelistService;
+    private final CommentNextDetectionService commentNextDetectionService;
 
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
 
-    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, AiFoundationClient aiFoundationClient, CommentReplyPublisher commentReplyPublisher, ObjectMapper objectMapper, PersonaResolver personaResolver, MomentsIntegrationService momentsIntegrationService) {
+    public CommentAiAutopilotEndpoint(ReactiveExtensionClient client, AiReplyOrchestrator orchestrator, AiReplyCleanupService cleanupService, AiFoundationClient aiFoundationClient, CommentReplyPublisher commentReplyPublisher, ObjectMapper objectMapper, PersonaResolver personaResolver, MomentsIntegrationService momentsIntegrationService, WhitelistService whitelistService, CommentNextDetectionService commentNextDetectionService) {
         this.client = client;
         this.orchestrator = orchestrator;
         this.cleanupService = cleanupService;
@@ -73,6 +78,8 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         this.objectMapper = objectMapper;
         this.personaResolver = personaResolver;
         this.momentsIntegrationService = momentsIntegrationService;
+        this.whitelistService = whitelistService;
+        this.commentNextDetectionService = commentNextDetectionService;
     }
 
     @Override
@@ -83,6 +90,14 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .POST("/replies/batch-reject", this::batchRejectReplies)
             .POST("/replies/batch-delete", this::batchDeleteReplies)
             .DELETE("/replies/{name}", this::deleteReply)
+            // 仅删除AI回评（删除已发布的Reply扩展，保留日志记录）
+            .DELETE("/replies/{name}/ai-reply", this::deleteAiReplyOnly)
+            // 删除评论者评论（删除Comment及其关联Reply，但保留AiCommentReply日志记录）
+            .DELETE("/replies/{name}/comment", this::deleteCommenterComment)
+            // 取消通过AI回复（将 Reply approved 设为 false，保留日志）
+            .POST("/replies/{name}/unpublish-ai-reply", this::unpublishAiReply)
+            // 取消通过评论者评论（将 Comment approved 设为 false，保留日志）
+            .POST("/replies/{name}/unpublish-comment", this::unpublishComment)
             .GET("/stats", this::getStats)
             .GET("/persona", this::getPersona)
             .GET("/conversation/{commentName}", this::getConversation)
@@ -91,6 +106,7 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .POST("/comments/{commentName}/trigger", this::triggerReply)
             .POST("/replies/{replyName}/trigger-conversation", this::triggerConversationReply)
             .GET("/commenters", this::listCommenters)
+            .GET("/admins", this::listAdmins)
             .POST("/cleanup", this::triggerCleanup)
             .GET("/health", this::health)
             .GET("/personas", this::listPersonas)
@@ -108,6 +124,12 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .POST("/replies/{name}/false-positive", this::falsePositive)
             // 查询瞬间插件可用性
             .GET("/moments-status", this::momentsStatus)
+            // 查询 Comment Next 插件冲突状态
+            .GET("/comment-next-status", this::commentNextStatus)
+            // 白名单评论者列表管理
+            .GET("/whitelist", this::getWhitelist)
+            .POST("/whitelist", this::updateWhitelist)
+            .DELETE("/whitelist", this::clearWhitelist)
             .build();
     }
 
@@ -231,6 +253,222 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .switchIfEmpty(ServerResponse.notFound().build());
     }
 
+    /**
+     * 仅删除AI回评：删除已发布的 Reply 扩展，保留 AiCommentReply 日志记录并将状态标记为 DELETED。
+     */
+    private Mono<ServerResponse> deleteAiReplyOnly(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return client.fetch(AiCommentReply.class, name)
+            .flatMap(record -> {
+                String replyName = record.getSpec().getReplyName();
+                Mono<Void> deleteReplyMono = Mono.empty();
+                if (replyName != null && !replyName.isBlank()) {
+                    deleteReplyMono = client.fetch(Reply.class, replyName)
+                        .flatMap(client::delete)
+                        .onErrorResume(e -> {
+                            log.warn("[Endpoint] Failed to delete Reply {}: {}", replyName, e.getMessage());
+                            return Mono.empty();
+                        })
+                        .then();
+                }
+                return deleteReplyMono.then(Mono.defer(() ->
+                    // 重新 fetch 最新版本，避免删除 Reply 期间版本号过期导致乐观锁重试无效
+                    client.fetch(AiCommentReply.class, name)
+                        .flatMap(latest -> {
+                            latest.getSpec().setStatus("DELETED");
+                            latest.getSpec().setPublished(false);
+                            return client.update(latest);
+                        })
+                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                            .filter(e -> e instanceof OptimisticLockingFailureException))
+                        .then(ServerResponse.ok().bodyValue(Map.of("message", "AI回评已删除，日志已保留")))
+                ));
+            })
+            .switchIfEmpty(ServerResponse.notFound().build());
+    }
+
+    /**
+     * 删除评论者评论：删除 Comment 及其所有 Reply 扩展，但保留 AiCommentReply 日志记录。
+     * 日志记录状态更新为 DELETED、published=false，便于审计追溯。
+     */
+    private Mono<ServerResponse> deleteCommenterComment(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return client.fetch(AiCommentReply.class, name)
+            .flatMap(record -> {
+                String commentName = record.getSpec().getCommentId();
+                if (commentName == null || commentName.isBlank()) {
+                    return ServerResponse.badRequest().bodyValue(Map.of("message", "找不到关联的评论"));
+                }
+                // 1. 删除所有关联的 Reply 扩展
+                Mono<Void> deleteRepliesMono = client.list(Reply.class,
+                        reply -> {
+                            var spec = reply.getSpec();
+                            return spec != null && commentName.equals(spec.getCommentName());
+                        }, null)
+                    .flatMap(client::delete, 10)
+                    .onErrorResume(e -> {
+                        log.warn("[Endpoint] Failed to delete replies for comment {}: {}", commentName, e.getMessage());
+                        return Mono.empty();
+                    })
+                    .then();
+                // 2. 保留 AiCommentReply 日志记录，仅更新状态为 DELETED、published=false
+                //    清空 replyName 避免前端误操作已删除的 Reply 扩展
+                Mono<Void> markLogsDeletedMono = client.list(AiCommentReply.class,
+                        r -> r.getSpec() != null && commentName.equals(r.getSpec().getCommentId()), null)
+                    .flatMap(r -> {
+                        r.getSpec().setStatus("DELETED");
+                        r.getSpec().setPublished(false);
+                        r.getSpec().setReplyName(null);
+                        return client.update(r)
+                            .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                                .filter(e -> e instanceof OptimisticLockingFailureException))
+                            .onErrorResume(e -> {
+                                log.warn("[Endpoint] Failed to mark AiCommentReply {} as DELETED: {}",
+                                    r.getMetadata().getName(), e.getMessage());
+                                return Mono.empty();
+                            });
+                    }, 10)
+                    .then();
+                // 3. 删除 Comment 本身
+                Mono<Void> deleteCommentMono = client.fetch(Comment.class, commentName)
+                    .flatMap(client::delete)
+                    .onErrorResume(e -> {
+                        log.warn("[Endpoint] Failed to delete Comment {}: {}", commentName, e.getMessage());
+                        return Mono.empty();
+                    })
+                    .then();
+                return deleteRepliesMono
+                    .then(markLogsDeletedMono)
+                    .then(deleteCommentMono)
+                    .then(ServerResponse.ok().bodyValue(Map.of("message", "违规评论已删除，日志已保留")));
+            })
+            .switchIfEmpty(ServerResponse.notFound().build());
+    }
+
+    /**
+     * 取消通过 AI 回复：将已发布的 Reply 扩展 approved 设为 false，保留 AiCommentReply 日志。
+     * 用于"已发布"状态下撤回 AI 回复的发布状态。
+     */
+    private Mono<ServerResponse> unpublishAiReply(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return client.fetch(AiCommentReply.class, name)
+            .flatMap(record -> {
+                String replyName = record.getSpec().getReplyName();
+                if (replyName == null || replyName.isBlank()) {
+                    return ServerResponse.badRequest()
+                        .bodyValue(Map.of("message", "该记录未关联已发布的 Reply，无需取消通过"));
+                }
+                return client.fetch(Reply.class, replyName)
+                    .flatMap(reply -> {
+                        reply.getSpec().setApproved(false);
+                        reply.getSpec().setApprovedTime(null);
+                        return client.update(reply);
+                    })
+                    .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                        .filter(e -> e instanceof OptimisticLockingFailureException))
+                    .then(Mono.defer(() -> client.fetch(AiCommentReply.class, name)
+                        .flatMap(latest -> {
+                            latest.getSpec().setPublished(false);
+                            return client.update(latest);
+                        })
+                        .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                            .filter(e -> e instanceof OptimisticLockingFailureException))
+                    ))
+                    .then(ServerResponse.ok().bodyValue(Map.of("message", "AI回复已取消通过，日志已保留")));
+            })
+            .switchIfEmpty(ServerResponse.notFound().build());
+    }
+
+    /**
+     * 取消通过评论者评论：将 Comment 扩展 approved 设为 false，保留 AiCommentReply 日志。
+     * 用于"已发布"状态下撤回评论者评论的发布状态。
+     */
+    private Mono<ServerResponse> unpublishComment(ServerRequest request) {
+        var name = request.pathVariable("name");
+        return client.fetch(AiCommentReply.class, name)
+            .flatMap(record -> {
+                String commentName = record.getSpec().getCommentId();
+                if (commentName == null || commentName.isBlank()) {
+                    return ServerResponse.badRequest()
+                        .bodyValue(Map.of("message", "找不到关联的评论"));
+                }
+                return client.fetch(Comment.class, commentName)
+                    .flatMap(comment -> {
+                        comment.getSpec().setApproved(false);
+                        comment.getSpec().setApprovedTime(null);
+                        return client.update(comment);
+                    })
+                    .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                        .filter(e -> e instanceof OptimisticLockingFailureException))
+                    .then(ServerResponse.ok().bodyValue(Map.of("message", "评论者评论已取消通过，日志已保留")));
+            })
+            .switchIfEmpty(ServerResponse.notFound().build());
+    }
+
+    /**
+     * 查询 Comment Next 插件冲突状态。
+     * 前端据此判断是否显示冲突提示卡。
+     */
+    private Mono<ServerResponse> commentNextStatus(ServerRequest request) {
+        return commentNextDetectionService.detect()
+            .flatMap(status -> ServerResponse.ok().bodyValue(Map.of(
+                "installed", status.installed(),
+                "enabled", status.enabled()
+            )));
+    }
+
+    /**
+     * 获取白名单配置（启用状态 + 评论者列表）。
+     */
+    private Mono<ServerResponse> getWhitelist(ServerRequest request) {
+        return whitelistService.getConfig()
+            .map(config -> Map.of(
+                "enabled", config.enabled(),
+                "commenters", config.list()
+            ))
+            .flatMap(result -> ServerResponse.ok().bodyValue(result));
+    }
+
+    /**
+     * 更新白名单评论者列表。
+     * 请求体：{ "commenters": ["name1", "name2", ...] }
+     */
+    private Mono<ServerResponse> updateWhitelist(ServerRequest request) {
+        return request.bodyToMono(String.class)
+            .flatMap(body -> {
+                List<String> commenters;
+                try {
+                    JsonNode node = objectMapper.readTree(body);
+                    JsonNode commentersNode = node.get("commenters");
+                    commenters = new ArrayList<>();
+                    if (commentersNode != null && commentersNode.isArray()) {
+                        commentersNode.forEach(n -> {
+                            String text = n.asText("").trim();
+                            if (!text.isEmpty()) {
+                                commenters.add(text);
+                            }
+                        });
+                    }
+                } catch (Exception e) {
+                    return ServerResponse.badRequest()
+                        .bodyValue(Map.of("message", "请求体格式错误: " + e.getMessage()));
+                }
+                return whitelistService.updateWhitelistedCommenters(commenters)
+                    .then(ServerResponse.ok().bodyValue(Map.of(
+                        "message", "白名单已更新",
+                        "commenters", commenters
+                    )));
+            });
+    }
+
+    /**
+     * 清空白名单评论者列表。
+     */
+    private Mono<ServerResponse> clearWhitelist(ServerRequest request) {
+        return whitelistService.clearWhitelistedCommenters()
+            .then(ServerResponse.ok().bodyValue(Map.of("message", "白名单已清空")));
+    }
+
     private Mono<ServerResponse> getStats(ServerRequest request) {
         return client.listAll(AiCommentReply.class, ListOptions.builder().build(), Sort.unsorted())
             .collectList()
@@ -240,17 +478,19 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     .filter(r -> "PASS".equals(r.getSpec().getStatus())).count();
                 long failCount = replies.stream()
                     .filter(r -> "FAIL".equals(r.getSpec().getStatus())).count();
+                long filteredCount = replies.stream()
+                    .filter(r -> "FILTERED".equals(r.getSpec().getStatus())).count();
 
                 long reviewingCount = replies.stream()
                     .filter(r -> "PASS".equals(r.getSpec().getStatus())
                         && !Boolean.TRUE.equals(r.getSpec().getPublished()))
                     .count();
 
-                return new StatsResponse(total, passCount, failCount, reviewingCount);
+                return new StatsResponse(total, passCount, failCount, reviewingCount, filteredCount);
             })
             .onErrorResume(e -> {
                 log.warn("Failed to fetch stats: {}", e.getMessage());
-                return Mono.just(new StatsResponse(0, 0, 0, 0));
+                return Mono.just(new StatsResponse(0, 0, 0, 0, 0));
             })
             .flatMap(stats -> ServerResponse.ok().bodyValue(stats));
     }
@@ -280,7 +520,8 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         long total,
         long passCount,
         long failCount,
-        long reviewingCount
+        long reviewingCount,
+        long filteredCount
     ) {}
 
     public record PersonaResponse(
@@ -785,10 +1026,27 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
             .flatMap(commenters -> ServerResponse.ok().bodyValue(commenters));
     }
 
+    private Mono<ServerResponse> listAdmins(ServerRequest request) {
+        return whitelistService.getAdminList()
+            .flatMap(result -> ServerResponse.ok().bodyValue(result));
+    }
+
     private Mono<ServerResponse> triggerCleanup(ServerRequest request) {
-        return cleanupService.getRetentionDays()
-            .flatMap(retentionDays -> cleanupService.executeCleanup(retentionDays)
-                .map(deleted -> Map.of("deletedCount", deleted, "retentionDays", retentionDays))
+        String daysParam = request.queryParam("days").orElse(null);
+        Mono<Integer> daysMono;
+        if (daysParam != null && !daysParam.isBlank()) {
+            try {
+                int days = Integer.parseInt(daysParam);
+                daysMono = Mono.just(Math.max(1, days));
+            } catch (NumberFormatException e) {
+                daysMono = cleanupService.getRetentionDays();
+            }
+        } else {
+            daysMono = cleanupService.getRetentionDays();
+        }
+        return daysMono
+            .flatMap(days -> cleanupService.executeCleanup(days)
+                .map(deleted -> Map.of("deletedCount", deleted, "retentionDays", days))
             )
             .flatMap(result -> ServerResponse.ok().bodyValue(result))
             .onErrorResume(e -> {
@@ -799,19 +1057,107 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
     }
 
     private Mono<ServerResponse> health(ServerRequest request) {
-        // AiFoundationClient is always created; availability is checked at runtime
-        return aiFoundationClient.isAvailable()
-            .map(available -> (HealthResponse) new HealthResponse(available, available, available, "", available ? "healthy" : "degraded"))
-            .defaultIfEmpty(new HealthResponse(false, false, false, "", "unhealthy"))
+        boolean classInstalled = aiFoundationClient.isInstalled();
+        if (!classInstalled) {
+            return ServerResponse.ok().bodyValue(new HealthResponse(false, false, false, "", "not-installed", "AI Foundation 插件未安装，请先安装该插件"));
+        }
+        return client.fetch(Plugin.class, "ai-foundation")
+            .switchIfEmpty(client.fetch(Plugin.class, "plugin-ai-foundation"))
+            .flatMap(plugin -> {
+                boolean pluginEnabled = false;
+                if (plugin.getStatus() != null && plugin.getStatus().getPhase() == Plugin.Phase.STARTED) {
+                    pluginEnabled = true;
+                } else if (plugin.getSpec() != null) {
+                    try {
+                        java.lang.reflect.Method getEnabled = plugin.getSpec().getClass().getMethod("getEnabled");
+                        Object val = getEnabled.invoke(plugin.getSpec());
+                        pluginEnabled = Boolean.TRUE.equals(val);
+                    } catch (Exception ignored) {}
+                }
+                if (!pluginEnabled) {
+                    return Mono.just(new HealthResponse(true, false, false, "", "not-enabled", "AI Foundation 插件已安装但未启用，请先启用插件"));
+                }
+                return checkAiFoundationStatus();
+            })
+            .switchIfEmpty(Mono.defer(() -> {
+                return client.listAll(Plugin.class, ListOptions.builder().build(),
+                        Sort.unsorted())
+                    .filter(p -> {
+                        String name = p.getMetadata() != null ? p.getMetadata().getName() : "";
+                        return name.contains("ai-foundation") || name.contains("AiFoundation");
+                    })
+                    .next()
+                    .flatMap(plugin -> {
+                        boolean pluginEnabled = false;
+                        if (plugin.getStatus() != null && plugin.getStatus().getPhase() == Plugin.Phase.STARTED) {
+                            pluginEnabled = true;
+                        }
+                        if (!pluginEnabled) {
+                            return Mono.just(new HealthResponse(true, false, false, "", "not-enabled", "AI Foundation 插件已安装但未启用，请先启用插件"));
+                        }
+                        return checkAiFoundationStatus();
+                    })
+                    .switchIfEmpty(Mono.defer(() -> checkAiFoundationStatus()));
+            }))
+            .onErrorResume(e -> Mono.just(new HealthResponse(true, false, false, "", "unhealthy", "AI Foundation 状态检测失败")))
             .flatMap(health -> ServerResponse.ok().bodyValue(health));
+    }
+
+    private Mono<HealthResponse> checkAiFoundationStatus() {
+        return Mono.zip(
+                aiFoundationClient.isAvailable(),
+                getConfiguredModelName()
+            )
+            .flatMap(tuple -> {
+                boolean available = tuple.getT1();
+                String modelName = tuple.getT2();
+                if (!available) {
+                    return Mono.just(new HealthResponse(true, false, false, modelName, "unhealthy", "AI Foundation 服务不可用，请检查配置"));
+                }
+                return aiFoundationClient.hasModel(modelName)
+                    .flatMap(hasModel -> {
+                        if (hasModel) {
+                            return Mono.just(new HealthResponse(true, true, true, modelName, "healthy", "AI Foundation 连接正常"));
+                        }
+                        return aiFoundationClient.hasModel(null)
+                            .map(hasDefault -> {
+                                if (hasDefault) {
+                                    return new HealthResponse(true, true, false, modelName, "degraded", "指定的模型不可用，将使用默认模型");
+                                }
+                                return new HealthResponse(true, true, false, modelName, "no-model", "AI Foundation 未配置默认模型，已添加模型需前往设置默认模型");
+                            });
+                    });
+            })
+            .defaultIfEmpty(new HealthResponse(true, false, false, "", "unhealthy", "AI Foundation 服务不可用"));
+    }
+
+    private Mono<String> getConfiguredModelName() {
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return null;
+                String modelJson = data.get("model");
+                if (modelJson == null || modelJson.isBlank()) return "";
+                try {
+                    JsonNode node = objectMapper.readTree(modelJson);
+                    if (node.has("modelName") && !node.get("modelName").asText("").isBlank()) {
+                        return node.get("modelName").asText("");
+                    }
+                } catch (Exception e) {
+                    log.debug("[Endpoint] Failed to parse modelName: {}", e.getMessage());
+                }
+                return "";
+            })
+            .defaultIfEmpty("");
     }
 
     public record HealthResponse(
         boolean aiFoundationInstalled,
         boolean aiFoundationEnabled,
-        boolean modelAvailable,
+        boolean modelConfigured,
         String modelName,
-        String status
+        String status,
+        String message
     ) {}
 
     private Mono<ServerResponse> listPersonas(ServerRequest request) {
@@ -958,18 +1304,45 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                                 var personaJson = objectMapper.writeValueAsString(personaData);
                                 var persona = objectMapper.readValue(personaJson, AiPersona.class);
                                 var personaName = persona.getMetadata().getName();
+                                // 清洗 metadata：仅保留 name，移除只读字段（creationTimestamp/finalizers/labels/annotations 等）
+                                // 更新时通过 fetch 获取已有记录的 version，避免校验失败
                                 return client.fetch(AiPersona.class, personaName)
                                     .flatMap(existing -> {
+                                        // 保留已有记录的 version 以通过乐观锁校验
                                         persona.getMetadata().setVersion(existing.getMetadata().getVersion());
+                                        // 移除只读字段，避免更新校验失败
+                                        persona.getMetadata().setCreationTimestamp(null);
+                                        persona.getMetadata().setFinalizers(null);
+                                        persona.getMetadata().setLabels(null);
+                                        persona.getMetadata().setAnnotations(null);
+                                        persona.getMetadata().setGenerateName(null);
+                                        persona.getMetadata().setDeletionTimestamp(null);
                                         return client.update(persona)
                                             .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
                                                 .filter(e -> e instanceof OptimisticLockingFailureException))
                                             .doOnSuccess(v -> results.add("角色 '" + persona.getSpec().getDisplayName() + "' 已更新"))
+                                            .onErrorResume(e -> {
+                                                results.add("角色 '" + persona.getSpec().getDisplayName() + "' 更新失败: " + e.getMessage());
+                                                return Mono.empty();
+                                            })
                                             .then();
                                     })
-                                    .switchIfEmpty(client.create(persona)
-                                        .doOnSuccess(v -> results.add("角色 '" + persona.getSpec().getDisplayName() + "' 已创建"))
-                                        .then());
+                                    .switchIfEmpty(Mono.defer(() -> {
+                                        persona.getMetadata().setCreationTimestamp(null);
+                                        persona.getMetadata().setFinalizers(null);
+                                        persona.getMetadata().setGenerateName(null);
+                                        persona.getMetadata().setDeletionTimestamp(null);
+                                        persona.getMetadata().setVersion(null);
+                                        persona.getMetadata().setLabels(null);
+                                        persona.getMetadata().setAnnotations(null);
+                                        return client.create(persona)
+                                            .doOnSuccess(v -> results.add("角色 '" + persona.getSpec().getDisplayName() + "' 已创建"))
+                                            .onErrorResume(e -> {
+                                                results.add("角色 '" + persona.getSpec().getDisplayName() + "' 创建失败: " + e.getMessage());
+                                                return Mono.empty();
+                                            })
+                                            .then();
+                                    }));
                             } catch (Exception e) {
                                 results.add("导入角色失败: " + e.getMessage());
                                 return Mono.<Void>empty();
@@ -982,8 +1355,11 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
                     ServerResponse.ok().bodyValue(java.util.Map.of("results", results))
                 );
             })
-            .onErrorResume(e -> ServerResponse.badRequest()
-                .bodyValue(java.util.Map.of("error", "导入失败: " + e.getMessage())));
+            .onErrorResume(e -> {
+                log.error("[Config] 导入配置失败", e);
+                return ServerResponse.badRequest()
+                    .bodyValue(java.util.Map.of("error", "导入失败: " + e.getMessage()));
+            });
     }
 
     private Mono<ServerResponse> updateReplyContent(ServerRequest request) {

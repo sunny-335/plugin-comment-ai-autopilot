@@ -161,4 +161,14 @@ class AiFoundationDelegate {
                 return Mono.just(false);
             });
     }
+
+    static Mono<Boolean> hasModel(ExtensionGetter extensionGetter, String modelName) {
+        return extensionGetter.getEnabledExtension(AiModelService.class)
+            .flatMap(service -> service.languageModel(modelName != null ? modelName : ""))
+            .hasElement()
+            .onErrorResume(e -> {
+                log.debug("[Delegate] hasModel check failed: {}", e.getMessage());
+                return Mono.just(false);
+            });
+    }
 }

@@ -32,6 +32,7 @@ public class AiReplyOrchestrator {
     private final FilterService filterService;
     private final RateLimitService rateLimitService;
     private final CommentPreFilterService preFilterService;
+    private final WhitelistService whitelistService;
     private final ReactiveExtensionClient client;
     private final ObjectMapper objectMapper;
 
@@ -51,6 +52,7 @@ public class AiReplyOrchestrator {
                                FilterService filterService,
                                RateLimitService rateLimitService,
                                CommentPreFilterService preFilterService,
+                               WhitelistService whitelistService,
                                ReactiveExtensionClient client,
                                ObjectMapper objectMapper) {
         this.contextExtractor = contextExtractor;
@@ -62,6 +64,7 @@ public class AiReplyOrchestrator {
         this.filterService = filterService;
         this.rateLimitService = rateLimitService;
         this.preFilterService = preFilterService;
+        this.whitelistService = whitelistService;
         this.client = client;
         this.objectMapper = objectMapper;
     }
@@ -239,26 +242,43 @@ public class AiReplyOrchestrator {
                                   String personaName) {
         return getModelName().flatMap(modelName ->
             contextExtractor.extract(commentName, replyName, isAiConversation)
-                .flatMap(context -> preFilterService.check(context.commentOwner(), context.commentContent(), modelName)
-                    .flatMap(preFilterResult -> {
-                        if (!preFilterResult.passed()) {
-                            log.warn("[Orchestrator] Comment pre-filtered: {}, reason: {}",
-                                commentName, preFilterResult.reason());
-                            // 创建拦截记录并执行处罚（针对实际违规的 Comment 或 Reply）
-                            return createFilteredRecord(context, preFilterResult)
-                                .then(preFilterService.penalize(commentName, replyName))
-                                .then();
-                        }
-                        return sentimentService.analyzeSentiment(context.commentContent(), modelName)
-                            .flatMap(sentimentResult -> {
-                                log.info("[Orchestrator] Sentiment for {}: {} (confidence: {})",
-                                    commentName, sentimentResult.sentiment(), sentimentResult.confidence());
-                                return promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
-                                    .flatMap(prompt -> createAiCommentReply(context, sentimentResult.sentiment(), personaName)
-                                        .flatMap(replyRecord -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
-                                    );
-                            });
-                    })
+                .flatMap(context ->
+                    // 先检查白名单：命中则跳过前置过滤拦截逻辑，直接进入情感分析与生成流程
+                    whitelistService.isWhitelisted(commentName)
+                        .flatMap(isWhitelisted -> {
+                            if (isWhitelisted) {
+                                log.info("[Orchestrator] Commenter is whitelisted, skipping pre-filter: {}", commentName);
+                                return sentimentService.analyzeSentiment(context.commentContent(), modelName)
+                                    .flatMap(sentimentResult -> {
+                                        log.info("[Orchestrator] Sentiment for {}: {} (confidence: {})",
+                                            commentName, sentimentResult.sentiment(), sentimentResult.confidence());
+                                        return promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
+                                            .flatMap(prompt -> createAiCommentReply(context, sentimentResult.sentiment(), personaName)
+                                                .flatMap(replyRecord -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
+                                            );
+                                    });
+                            }
+                            return preFilterService.check(context.commentOwner(), context.commentContent(), modelName)
+                                .flatMap(preFilterResult -> {
+                                    if (!preFilterResult.passed()) {
+                                        log.warn("[Orchestrator] Comment pre-filtered: {}, reason: {}",
+                                            commentName, preFilterResult.reason());
+                                        // 创建拦截记录并执行处罚（针对实际违规的 Comment 或 Reply）
+                                        return createFilteredRecord(context, preFilterResult)
+                                            .then(preFilterService.penalize(commentName, replyName))
+                                            .then();
+                                    }
+                                    return sentimentService.analyzeSentiment(context.commentContent(), modelName)
+                                        .flatMap(sentimentResult -> {
+                                            log.info("[Orchestrator] Sentiment for {}: {} (confidence: {})",
+                                                commentName, sentimentResult.sentiment(), sentimentResult.confidence());
+                                            return promptBuilder.buildPrompt(context, sentimentResult.sentiment(), personaName)
+                                                .flatMap(prompt -> createAiCommentReply(context, sentimentResult.sentiment(), personaName)
+                                                    .flatMap(replyRecord -> generateAndPublish(prompt, context, replyRecord, modelName, personaName))
+                                                );
+                                        });
+                                });
+                        })
                 )
         );
     }
@@ -307,12 +327,14 @@ public class AiReplyOrchestrator {
     private Mono<Void> generateAndPublish(String prompt, ContextExtractor.CommentContext context,
                                            AiCommentReply replyRecord, String modelName,
                                            String personaName) {
-        return aiReplyService.generateReply(prompt, modelName)
+        // 确保记录中保留本次生成使用的角色名（覆盖误报重试等场景下旧的 personaName）
+        Mono<AiCommentReply> ensurePersonaMono = ensurePersonaName(replyRecord, personaName);
+        return ensurePersonaMono.flatMap(record -> aiReplyService.generateReply(prompt, modelName)
             .defaultIfEmpty("")
             .flatMap(aiReply -> {
                 if (aiReply.isBlank()) {
                     log.warn("[Orchestrator] AI generated empty reply for: {}", context.commentId());
-                    return retryOrFail(replyRecord, context, modelName, personaName, "AI generated empty reply");
+                    return retryOrFail(record, context, modelName, personaName, "AI generated empty reply");
                 }
 
                 log.info("[Orchestrator] AI generated reply for {}: {} chars",
@@ -326,10 +348,10 @@ public class AiReplyOrchestrator {
                             log.warn("[Orchestrator] Content safety review FAILED for: {}, not publishing",
                                 context.commentId());
                             // Save the failed reply content, then retry
-                            return updateRecord(replyRecord, aiReply, 0, "FAIL", false, null)
-                                .then(retryOrFail(replyRecord, context, modelName, personaName, "Content safety review failed"));
+                            return updateRecord(record, aiReply, 0, "FAIL", false, null)
+                                .then(retryOrFail(record, context, modelName, personaName, "Content safety review failed"));
                         }
-                        return publishReply(context, aiReply, replyRecord, reviewResult.score(), personaName);
+                        return publishReply(context, aiReply, record, reviewResult.score(), personaName);
                     })
                     .onErrorResume(e -> {
                         // review() already handles errors internally (returns PASS),
@@ -339,7 +361,30 @@ public class AiReplyOrchestrator {
                             context.commentId(), e.getMessage(), e);
                         return Mono.empty();
                     });
-            });
+            }));
+    }
+
+    /**
+     * 确保记录中 personaName 与本次生成使用的角色名一致。
+     * 仅当记录中 personaName 为空或与当前 personaName 不一致时才更新，避免无谓的写操作。
+     */
+    private Mono<AiCommentReply> ensurePersonaName(AiCommentReply replyRecord, String personaName) {
+        String existing = replyRecord.getSpec().getPersonaName();
+        if (personaName != null && !personaName.equals(existing)) {
+            return client.fetch(AiCommentReply.class, replyRecord.getMetadata().getName())
+                .flatMap(latest -> {
+                    latest.getSpec().setPersonaName(personaName);
+                    return client.update(latest);
+                })
+                .retryWhen(Retry.backoff(3, Duration.ofMillis(100))
+                    .filter(e -> e instanceof OptimisticLockingFailureException))
+                .onErrorResume(e -> {
+                    log.debug("[Orchestrator] Failed to update personaName for {}: {}",
+                        replyRecord.getMetadata().getName(), e.getMessage());
+                    return Mono.just(replyRecord);
+                });
+        }
+        return Mono.just(replyRecord);
     }
 
     /**
@@ -532,15 +577,16 @@ public class AiReplyOrchestrator {
                 try {
                     JsonNode node = objectMapper.readTree(basicJson);
                     if (node.has("maxRetryCount")) {
-                        return node.get("maxRetryCount").asInt(3);
+                        int v = node.get("maxRetryCount").asInt(3);
+                        return Math.max(0, Math.min(10, v));
                     }
                 } catch (Exception e) {
-                    log.warn("[Orchestrator] Failed to parse maxRetryCount from ConfigMap: {}", e.getMessage());
+                    log.warn("[Orchestrator] Failed to parse maxRetryCount: {}", e.getMessage());
                 }
                 return null;
             })
             .onErrorResume(e -> {
-                log.debug("[Orchestrator] Failed to fetch maxRetryCount setting from ConfigMap: {}", e.getMessage());
+                log.debug("[Orchestrator] Failed to fetch maxRetryCount: {}", e.getMessage());
                 return Mono.empty();
             })
             .defaultIfEmpty(3);
@@ -555,19 +601,26 @@ public class AiReplyOrchestrator {
                 if (basicJson == null || basicJson.isBlank()) return null;
                 try {
                     JsonNode node = objectMapper.readTree(basicJson);
+                    if (node.has("maxConversationTurns")) {
+                        int v = node.get("maxConversationTurns").asInt(10);
+                        if (v == 0) return Integer.MAX_VALUE;
+                        return Math.max(0, Math.min(100, v));
+                    }
                     if (node.has("maxConversationRounds")) {
-                        return node.get("maxConversationRounds").asInt(8);
+                        int v = node.get("maxConversationRounds").asInt(8);
+                        if (v == 0) return Integer.MAX_VALUE;
+                        return Math.max(0, Math.min(100, v));
                     }
                 } catch (Exception e) {
-                    log.warn("[Orchestrator] Failed to parse maxConversationRounds from ConfigMap: {}", e.getMessage());
+                    log.warn("[Orchestrator] Failed to parse maxConversationTurns: {}", e.getMessage());
                 }
                 return null;
             })
             .onErrorResume(e -> {
-                log.debug("[Orchestrator] Failed to fetch maxConversationRounds setting from ConfigMap: {}", e.getMessage());
+                log.debug("[Orchestrator] Failed to fetch maxConversationTurns: {}", e.getMessage());
                 return Mono.empty();
             })
-            .defaultIfEmpty(8);
+            .defaultIfEmpty(10);
     }
 
     private Mono<Integer> getConversationRounds(String commentName) {
@@ -601,19 +654,24 @@ public class AiReplyOrchestrator {
                 if (basicJson == null || basicJson.isBlank()) return null;
                 try {
                     JsonNode node = objectMapper.readTree(basicJson);
+                    if (node.has("rateLimitPerHour")) {
+                        int perHour = node.get("rateLimitPerHour").asInt(0);
+                        if (perHour == 0) return Integer.MAX_VALUE;
+                        return Math.max(1, (int) Math.ceil(perHour / 60.0));
+                    }
                     if (node.has("rateLimitPerMinute")) {
-                        return node.get("rateLimitPerMinute").asInt(10);
+                        return Math.max(1, node.get("rateLimitPerMinute").asInt(10));
                     }
                 } catch (Exception e) {
-                    log.warn("[Orchestrator] Failed to parse rateLimitPerMinute from ConfigMap: {}", e.getMessage());
+                    log.warn("[Orchestrator] Failed to parse rateLimitPerHour: {}", e.getMessage());
                 }
                 return null;
             })
             .onErrorResume(e -> {
-                log.debug("[Orchestrator] Failed to fetch rateLimitPerMinute setting from ConfigMap: {}", e.getMessage());
+                log.debug("[Orchestrator] Failed to fetch rateLimitPerHour: {}", e.getMessage());
                 return Mono.empty();
             })
-            .defaultIfEmpty(10);
+            .defaultIfEmpty(Integer.MAX_VALUE);
     }
 
     /**

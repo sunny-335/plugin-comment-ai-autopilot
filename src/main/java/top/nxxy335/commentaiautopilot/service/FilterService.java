@@ -27,6 +27,7 @@ public class FilterService {
     private static final String CONFIG_MAP_NAME = "comment-ai-autopilot-configmap";
     private static final String ANNOTATION_KEY = "comment-ai-autopilot.nxxy335.top/ai-reply-enabled";
     private static final String GROUP_CONTENT = "content.halo.run";
+    private static final String GROUP_MOMENT = "moment.halo.run";
 
     public FilterService(ReactiveExtensionClient client, ObjectMapper objectMapper) {
         this.client = client;
@@ -114,13 +115,15 @@ public class FilterService {
         }
 
         if (GROUP_CONTENT.equals(group) && "SinglePage".equals(kind)) {
-            return client.fetch(SinglePage.class, name)
-                .map(page -> resolveAnnotation(page.getMetadata().getAnnotations(), false))
-                .defaultIfEmpty(false);
+            return getPagesEnabled()
+                .flatMap(pagesEnabled ->
+                    client.fetch(SinglePage.class, name)
+                        .map(page -> resolveAnnotation(page.getMetadata().getAnnotations(), pagesEnabled))
+                        .defaultIfEmpty(pagesEnabled)
+                );
         }
 
-        // 瞬间插件评论：读取 momentsEnabled 配置（默认开启）
-        if ("Moment".equals(kind)) {
+        if (GROUP_MOMENT.equals(group) && "Moment".equals(kind)) {
             return getMomentsEnabled();
         }
 
@@ -154,6 +157,31 @@ public class FilterService {
                 return Mono.just(true);
             })
             .defaultIfEmpty(true);
+    }
+
+    private Mono<Boolean> getPagesEnabled() {
+        return client.fetch(ConfigMap.class, CONFIG_MAP_NAME)
+            .mapNotNull(cm -> {
+                var data = cm.getData();
+                if (data == null) return false;
+                String basicJson = data.get("basic");
+                if (basicJson == null || basicJson.isBlank()) return false;
+                try {
+                    JsonNode node = objectMapper.readTree(basicJson);
+                    if (!node.has("pagesEnabled")) {
+                        return false;
+                    }
+                    return node.get("pagesEnabled").asBoolean(false);
+                } catch (Exception e) {
+                    log.warn("[Filter] Failed to parse pagesEnabled: {}", e.getMessage());
+                    return false;
+                }
+            })
+            .onErrorResume(e -> {
+                log.debug("[Filter] Failed to fetch pagesEnabled: {}", e.getMessage());
+                return Mono.just(false);
+            })
+            .defaultIfEmpty(false);
     }
 
     private boolean resolveAnnotation(java.util.Map<String, String> annotations, boolean defaultEnabled) {
