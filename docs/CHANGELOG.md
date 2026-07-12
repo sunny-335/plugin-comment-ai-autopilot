@@ -1,5 +1,25 @@
 # 更新日志
 
+## v1.4.1
+
+> 2026-07-06
+
+### 改进
+
+- **重写 README.md** — 精简结构，添加 AI 辅助开发声明（GLM-5.1/5.2、Qwen3.6/3.7 Plus、Doubao Seed 2.1 Pro、MIMO V2.5）
+- **死代码清理** — 移除 6 项未使用的代码和依赖
+
+### 移除
+
+- **WhitelistService.isSuperAdmin** — 未使用的 private 方法，功能已被 isAdminUser 覆盖
+- **CommentAiAutopilotEndpoint.PersonaResponse** — 未使用的 record 定义
+- **AiBadgeHeadProcessor** — 空操作的 TemplateHeadProcessor 实现类（整个文件删除）
+- **ui/src/utils/api.ts** — 未使用的 API 路径常量文件（整个文件删除）
+- **ui/src/utils/gravatar.ts** — 未使用的 Gravatar 工具文件（整个文件删除）
+- **canvas-confetti 依赖** — package.json 中声明但从未 import 的前端依赖
+
+---
+
 ## v1.4.0
 
 > 2026-07-06

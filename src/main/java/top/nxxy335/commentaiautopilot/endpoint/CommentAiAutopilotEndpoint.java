@@ -524,12 +524,6 @@ public class CommentAiAutopilotEndpoint implements CustomEndpoint {
         long filteredCount
     ) {}
 
-    public record PersonaResponse(
-        String name,
-        String prompt,
-        String avatar
-    ) {}
-
     private Mono<ServerResponse> getConversation(ServerRequest request) {
         var commentName = request.pathVariable("commentName");
         return client.fetch(Comment.class, commentName)

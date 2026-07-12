@@ -137,27 +137,6 @@ public class WhitelistService {
         return Mono.just(matchByDisplayName(owner, config.list()));
     }
 
-    /**
-     * 通过 User 资源的角色注解判断是否为超级管理员（super-role）。
-     */
-    private Mono<Boolean> isSuperAdmin(String username) {
-        return client.fetch(User.class, username)
-            .map(user -> {
-                var annotations = user.getMetadata().getAnnotations();
-                if (annotations == null) return false;
-                String roleNames = annotations.get(User.ROLE_NAMES_ANNO);
-                if (roleNames == null || roleNames.isBlank()) return false;
-                return Arrays.stream(roleNames.split(","))
-                    .map(String::trim)
-                    .anyMatch(SUPER_ROLE::equals);
-            })
-            .defaultIfEmpty(false)
-            .onErrorResume(e -> {
-                log.debug("[Whitelist] 获取 User {} 失败: {}", username, e.getMessage());
-                return Mono.just(false);
-            });
-    }
-
     private Mono<Boolean> isAdminUser(String username) {
         return client.fetch(User.class, username)
             .map(user -> {
